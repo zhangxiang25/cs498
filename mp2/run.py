@@ -232,7 +232,7 @@ class Experiment:
         '''
         You code goes here.
         '''
-
+        print(dir(self.scene["birdview_camera"].data))
         # birdview_camera intrinsic and extrinsic matrix
         intrinsics = np.squeeze(self.scene["birdview_camera"].data.intrinsic_matrices.detach().cpu().numpy())
         #extrinsics = np.array([
@@ -248,6 +248,7 @@ class Experiment:
             [ 0,  0, -1, 1.2],
             [ 0,  0,  0,   1]
         ])
+        # extrinsics = self.scene["birdview_camera"].data.world_to_view_matrix.detach().cpu().numpy()[0]
 
         # move the robot out of the way for getting information from birdview camera
         self.sim_wait(20)
@@ -263,9 +264,9 @@ class Experiment:
         # TODO: move the robot to make the stack
         hsv = cv2.cvtColor(color, cv2.COLOR_RGB2HSV)
 
-        lower_red1 = np.array([0, 120, 70])
+        lower_red1 = np.array([0, 120, 40])
         upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([170, 120, 70])
+        lower_red2 = np.array([170, 120, 40])
         upper_red2 = np.array([180, 255, 255])
         lower_green = np.array([40, 100, 50])
         upper_green = np.array([80, 255, 255])
@@ -306,6 +307,35 @@ class Experiment:
         points_world_h = (np.linalg.inv(extrinsics) @ points_camera_h.T).T
         points_world = points_world_h[:, :3]
 
+        #
+        # Calculate centroid from the raw red mask data
+        red_centroid = None
+        red_pixels = red_mask.flatten().astype(bool)
+        red_points = points_world[red_pixels]
+
+        # 定义关键高度
+        pre_grasp_height = 0.12  # 预抓取高度：立方体上方10厘米
+        grasp_height = 0.02      # 抓取高度：立方体上方2厘米
+        GRIPPER_OPEN_POS = 0.03    # 夹爪完全张开的位置 (m)
+        GRIPPER_CLOSED_POS = 0.0   # 夹爪完全闭合的位置 (m)
+        CUBE_HEIGHT = 0.05
+        PRE_MOVE_HEIGHT = 0.12 # Safe height for moves
+        
+        if red_points.shape[0] > 0:
+            r_top_z = np.max(red_points[:, 2])
+
+                # 2. The X and Y of the center is the average of the visible points
+            r_center_x = np.mean(red_points[:, 0])
+            r_center_y = np.mean(red_points[:, 1])
+
+            # 3. The true Z center is half a cube height below the top surface
+            
+            r_center_z = r_top_z - (CUBE_HEIGHT / 2.0)
+
+                # 4. Assemble the corrected, more accurate centroid
+            r_red_centroid = np.array([r_center_x, r_center_y, r_center_z])
+            print(f"CALCULATED RED CUBE CENTROID (from raw data): {r_red_centroid}")
+
                
         # Clean the masks to remove noise before finding contours
         kernel = np.ones((5, 5), np.uint8)
@@ -325,7 +355,20 @@ class Experiment:
             red_pixels = final_red_mask.flatten().astype(bool)
             red_points = points_world[red_pixels]
             if red_points.shape[0] > 0:
-                red_centroid = np.mean(red_points, axis=0)
+                #red_centroid = np.mean(red_points, axis=0)
+                # 1. Find the Z coordinate of the cube's top surface
+                top_z = np.max(red_points[:, 2])
+
+                # 2. The X and Y of the center is the average of the visible points
+                center_x = np.mean(red_points[:, 0])
+                center_y = np.mean(red_points[:, 1])
+
+                # 3. The true Z center is half a cube height below the top surface
+                CUBE_HEIGHT = 0.05 
+                center_z = top_z - (CUBE_HEIGHT / 2.0)
+
+                # 4. Assemble the corrected, more accurate centroid
+                red_centroid = np.array([center_x, center_y, center_z])
                 print(f"CALCULATED RED CUBE CENTROID: {red_centroid}")
 
         # Find centroids for all green obstacles
@@ -338,7 +381,14 @@ class Experiment:
                 green_pixels = mask.flatten().astype(bool)
                 green_points = points_world[green_pixels]
                 if green_points.shape[0] > 0:
-                    green_centroids.append(np.mean(green_points, axis=0))
+                    top_z = np.max(green_points[:, 2])
+                    center_x = np.mean(green_points[:, 0])
+                    center_y = np.mean(green_points[:, 1])
+                    CUBE_HEIGHT = 0.05
+                    center_z = top_z - (CUBE_HEIGHT / 2.0)
+                    corrected_centroid = np.array([center_x, center_y, center_z])
+                    green_centroids.append(corrected_centroid)
+                    #green_centroids.append(np.mean(green_points, axis=0))
         
         red_pixels = red_mask.flatten().astype(bool)
         green_pixels = green_mask.flatten().astype(bool)
@@ -394,42 +444,85 @@ class Experiment:
             quat_xyzw = Rotation.from_matrix(rotation_matrix).as_quat()
             target_quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
 
-            # 定义关键高度
-            pre_grasp_height = 0.10  # 预抓取高度：立方体上方10厘米
-            grasp_height = 0.02      # 抓取高度：立方体上方2厘米
-            GRIPPER_OPEN_POS = 0.04    # 夹爪完全张开的位置 (m)
-            GRIPPER_CLOSED_POS = 0.0   # 夹爪完全闭合的位置 (m)
+            
 
+            # The best base is the one most isolated from other cubes, offering more room to maneuver.
+            best_base = None
+            max_isolation_dist = -1
+            all_cubes = [red_centroid] + green_centroids
+            for candidate_base in green_centroids:
+                dist_sum = 0
+                for other_cube in all_cubes:
+                    if not np.array_equal(candidate_base, other_cube):
+                        dist_sum += np.linalg.norm(candidate_base - other_cube)
+                if dist_sum > max_isolation_dist:
+                    max_isolation_dist = dist_sum
+                    best_base = candidate_base
+            base_green_cube = best_base
+
+            remaining_green = [gc for gc in green_centroids if not np.array_equal(gc, base_green_cube)]
+            top_green_cube = remaining_green[0]
+
+            fixed_orientation = Rotation.from_euler('xyz', [180, 0, 90], degrees=True).as_quat()[[3, 0, 1, 2]]
+            
+            print(f"Base green cube selected at: {base_green_cube}")
+            print(f"Top green cube selected at: {top_green_cube}")
 
             print("正在打开夹爪...")
             self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_OPEN_POS, count=50)
             self.sim_wait(30)
 
-            # 1. 移动到预抓取位置
             print("正在移动到预抓取位置...")
             pre_grasp_pos = red_centroid + np.array([0.0, 0.0, pre_grasp_height])
             pre_grasp_pose = np.concatenate([pre_grasp_pos, target_quat_wxyz])
+            #pre_grasp_pose = np.concatenate([pre_grasp_pos, fixed_orientation])
             self.move_robot_ik(pre_grasp_pose)
             self.sim_wait(30)
 
-            # 2. 下降到抓取位置
+    
             print("正在下降以进行抓取...")
             grasp_pos = red_centroid + np.array([0.0, 0.0, grasp_height])
             grasp_pose = np.concatenate([grasp_pos, target_quat_wxyz])
+            # grasp_pose = np.concatenate([grasp_pos, fixed_orientation])
             self.move_robot_ik(grasp_pose)
             self.sim_wait(30)
 
-            # 3. 闭合夹爪
+  
             print("正在闭合夹爪...")
             self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_CLOSED_POS, count=50)
             self.sim_wait(50)
 
-            # 4. 提起立方体
-            print("正在提起立方体...")
+            print("Picking the red cube")
             self.move_robot_ik(pre_grasp_pose) # Move back up to the pre-grasp height
             self.sim_wait(50)
 
-            print("Grasp sequence complete!")
+            place_pos_red = base_green_cube + np.array([0, 0, CUBE_HEIGHT])
+            print(f"--- Placing RED cube at {place_pos_red} ---")
+            pre_place_pos = place_pos_red + np.array([0.0, 0.0, PRE_MOVE_HEIGHT])
+            # self.move_robot_ik(np.concatenate([pre_place_pos, fixed_orientation])); self.sim_wait(50)
+            self.move_robot_ik(np.concatenate([pre_place_pos, target_quat_wxyz])); self.sim_wait(50)
+            self.move_robot_ik(np.concatenate([place_pos_red, target_quat_wxyz])); self.sim_wait(50)
+            self.move_robot_joint(None, GRIPPER_OPEN_POS, count=50); self.sim_wait(50)
+            self.move_robot_ik(np.concatenate([pre_place_pos, target_quat_wxyz])); self.sim_wait(40)
+
+            # === MOVE 2: Place TOP GREEN cube on RED cube ===
+            print(f"--- Picking TOP GREEN cube at {top_green_cube} ---")
+            pre_grasp_pos = top_green_cube + np.array([0.0, 0.0, PRE_MOVE_HEIGHT])
+            grasp_pos = top_green_cube + np.array([0.0, 0.0, grasp_height])
+            self.move_robot_ik(np.concatenate([pre_grasp_pos, target_quat_wxyz])); self.sim_wait(40)
+            self.move_robot_ik(np.concatenate([grasp_pos, target_quat_wxyz])); self.sim_wait(40)
+            self.move_robot_joint(None, GRIPPER_CLOSED_POS, count=50); self.sim_wait(50)
+            self.move_robot_ik(np.concatenate([pre_grasp_pos, target_quat_wxyz])); self.sim_wait(40)
+            
+            place_pos_green_top = base_green_cube + np.array([0, 0, CUBE_HEIGHT * 2])
+            print(f"--- Placing TOP GREEN cube at {place_pos_green_top} ---")
+            pre_place_pos = place_pos_green_top + np.array([0.0, 0.0, PRE_MOVE_HEIGHT])
+            self.move_robot_ik(np.concatenate([pre_place_pos, target_quat_wxyz])); self.sim_wait(50)
+            self.move_robot_ik(np.concatenate([place_pos_green_top, target_quat_wxyz])); self.sim_wait(50)
+            self.move_robot_joint(None, GRIPPER_OPEN_POS, count=50); self.sim_wait(50)
+            self.move_robot_ik(np.concatenate([pre_place_pos, target_quat_wxyz])); self.sim_wait(40)
+
+            print(">>> STACKING SEQUENCE COMPLETE! <<<")
 
         # steps simulation but does not command the robot
         while simulation_app.is_running():
