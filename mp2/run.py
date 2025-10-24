@@ -25,8 +25,7 @@ from isaaclab.controllers import DifferentialIKController, DifferentialIKControl
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
 
-from scipy.spatial.transform import Rotation
-from scipy import ndimage
+# from scipy.spatial.transform import Rotation
 from scipy.ndimage import ( # Needed for advanced image processing
     binary_opening, binary_closing, binary_fill_holes,
     generate_binary_structure, label
@@ -49,7 +48,7 @@ class Experiment:
         self.sim.set_simulation_dt(physics_dt = PHYSICS_DT, rendering_dt = RENDERING_DT)
         print("\nSim dt: {}\n".format(self.sim.get_physics_dt()))
         self.sim_dt = self.sim.get_physics_dt()
-
+        
         # initialize scene
         scene_cfg = MP2SceneCfg(args_cli.num_envs, env_spacing=2.0)
         self.scene = InteractiveScene(scene_cfg)
@@ -245,8 +244,6 @@ class Experiment:
             [ 0,  0,  0,   1]
         ])
 
-        
-
         # move the robot out of the way for getting information from birdview camera
         self.sim_wait(20)
         target_robot_pos = self.robot_pos - np.array([0.15, 0.2, 0.0])
@@ -255,35 +252,56 @@ class Experiment:
 
         # render birdview camera image
         color_raw = self.scene["birdview_camera"].data.output["rgb"].detach().cpu().numpy()[0]
-        depth_image = np.squeeze(self.scene["birdview_camera"].data.output["depth"].detach().cpu().numpy()[0])
         #plt.imshow(color)
         
         # TODO: move the robot to make the stack
-        color = color_raw[:, :, :3] if color_raw.shape[2] == 4 else color_raw
-        height, width, _ = color.shape
+        # h_ : Hue ranges for detecting red and green in the HSV color space
+        h_red_low_1 = 0.00
+        h_red_high_1 = 0.04
+        h_red_low_2 = 0.96
+        h_red_high_2 = 1.00
+        h_green_low = 0.23
+        h_green_high = 0.44
+        # minimum thresholds for Saturation (S) and Value (V)
+        s_min = 0.40
+        v_min = 0.20
+        # The number of iterations for morphological image processing operations, which are used to clean up noise
+        morph_iters = 2
 
+        hover_offset = 0.12
+        lift_offset = 0.16
+        grasp_depth = 0.02
+        
+        # Ensures the image is in a standard RGB format
+        color = color_raw[:, :, :3] if color_raw.shape[2] == 4 else color_raw
+        
+        height, width, _ = color.shape
+        # distance of each pixel from the camera, remove any extra,single-value dimensions
+        depth_image = np.squeeze(self.scene["birdview_camera"].data.output["depth"].detach().cpu().numpy()[0])
         # Convert RGB to HSV color space
-        rgb01 = np.clip(color.astype(np.float32)/255.0, 0.0, 1.0)
+        rgb01 = np.clip(color.astype(np.float32)/255.0, 0.0, 1.0) # Normalize it
         hsv = mcolors.rgb_to_hsv(rgb01)
         h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
         
-        s_min, v_min, morph_iters = 0.40, 0.20, 2
-        red1_raw = (h >= 0.00) & (h <= 0.04) & (s >= s_min) & (v >= v_min)
-        red2_raw = (h >= 0.96) & (h <= 1.00) & (s >= s_min) & (v >= v_min)
+        # initial binary masks
+        red1_raw = (h >= h_red_low_1) & (h <= h_red_high_1) & (s >= s_min) & (v >= v_min)
+        red2_raw = (h >= h_red_low_2) & (h <= h_red_high_2) & (s >= s_min) & (v >= v_min)
         red_mask_raw = red1_raw | red2_raw
-        green_mask_raw = (h >= 0.23) & (h <= 0.44) & (s >= s_min) & (v >= v_min)
+        green_mask_raw = (h >= h_green_low) & (h <= h_green_high) & (s >= s_min) & (v >= v_min)
 
+        # 3x3 square where all elements are considered neighbors
         struct = generate_binary_structure(2, 2)
+        # removes small, isolated bright spots
         red_mask = binary_opening(red_mask_raw, structure=struct, iterations=morph_iters)
+        # fills any black holes inside a larger white object
         red_mask = binary_fill_holes(red_mask)
+        # fills small gaps and holes within an object
         red_mask = binary_closing(red_mask, structure=struct, iterations=max(1, morph_iters // 2))
         green_mask = binary_opening(green_mask_raw, structure=struct, iterations=morph_iters)
         green_mask = binary_fill_holes(green_mask)
         green_mask = binary_closing(green_mask, structure=struct, iterations=max(1, morph_iters // 2))
         
-
-# Now your red_mask and green_mask are much cleaner!
-
+        # Visualizing the 2D Masks
         fig, axs = plt.subplots(1, 3, figsize=(15, 5))
         axs[0].imshow(color)
         axs[0].set_title('Original Image')
@@ -294,28 +312,31 @@ class Experiment:
         plt.savefig("color_masks.png") # Save the figure instead
         plt.close()
 
+        # Creating a 3D Point Cloud
+        height, width = depth_image.shape
         
-        height, width, _ = color.shape
-
+        # focal lengths of the camera lens
         fx = intrinsics[0,0]
         fy = intrinsics[1,1]
+        # principal point
         cx = intrinsics[0,2]
         cy = intrinsics[1,2]
-
-        y_pixel, x_pixel = np.indices((height, width))
+        # row index (y-coordinate) and column index (x-coordinate) at each position
+        y_pixel, x_pixel = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
+        # Turns 2D pixels into 3D points in the camera's coordinate system.
         z_c = depth_image
         x_c = z_c * (x_pixel - cx) / fx
         y_c = z_c * (y_pixel - cy) / fy
 
-        points_camera = np.stack((x_c, y_c, z_c), axis=-1).reshape(-1, 3) #flat pc
-        points_camera_h = np.hstack((points_camera, np.ones((points_camera.shape[0], 1)))) #ph
-        H, W, _ = points_camera.shape
-        #points_world_h = (np.linalg.inv(extrinsics) @ points_camera_h.T).T
-        points_world_h = extrinsics @ points_camera_h
-        points_world = points_world_h[:, :3]
+        points_camera = np.stack((x_c, y_c, z_c), axis=-1).reshape(-1, 3) 
+        # transforms the points from the camera's coordinate system to the global world coordinate system.
+        ones = np.ones((points_camera.shape[0], 1), dtype=points_camera.dtype)
+        points_world_h = extrinsics @ np.concatenate([points_camera, ones], axis=1).T
+               
         points_world = (points_world_h[:3,:] / np.clip(points_world_h[3,:], 1e-8, None)).T
-        pc_world = points_world.reshape(H, W, 3)
-
+        pc_world = points_world.reshape(height, width, 3)
+        
+        # flatten the 2D masks into 1D arrays
         red_pixels = red_mask.flatten().astype(bool)
         green_pixels = green_mask.flatten().astype(bool)
        
@@ -342,158 +363,127 @@ class Experiment:
         plt.savefig("scene_point_cloud.png")
         plt.close(fig)
 
-        # Calculate centroid from the raw red mask data
-        r_CUBE_HEIGHT = 0.04
-        red_centroid = None
+        # Scans the mask and finds all separate, contiguous white regions, assigning a unique ID to each one.
+        lab_red, n_red = label(red_mask.astype(np.uint8), structure=struct); 
+        # Find the largest red object by area
+        red_cid_main, _ = max([(cid, (lab_red == cid).sum()) for cid in range(1, n_red + 1)], key=lambda item: item[1])
+        # boolean mask where only the pixels belonging to the largest red object are True
+        idx_red = (lab_red == red_cid_main).reshape(-1); 
+        # selects 3D points from the full-scene point cloud that correspond to the largest red object
+        pts_red = pc_world.reshape(-1, 3)[idx_red]; 
+        # removes any points have invalid coordinate values
+        pts_red = pts_red[np.isfinite(pts_red).all(axis=1)]
+        # calculates the centroid of the red object in the XY plane.
+        centroid_xy_red = np.nanmedian(pts_red[:, :2], axis=0); 
+        # Finds the 95th and 5th percentile of all Z-coordinates.
+        top_z_red = float(np.nanpercentile(pts_red[:, 2], 95)); 
+        low_z_red = float(np.nanpercentile(pts_red[:, 2], 5))
+        # Gathers all the computed statistics into a dictionary
+        red_stats = {"centroid_xy": centroid_xy_red, "top_z": top_z_red, "low_z": low_z_red, "size_xy": np.nanpercentile(pts_red[:, :2], 95, axis=0) - np.nanpercentile(pts_red[:, :2], 5, axis=0)}
+        # red_edge = np.clip(float(np.mean(np.abs(red_stats["size_xy"]))), 0.03, 0.06)
+        red_edge = 0.04
+
+        lab_green, n_green = label(green_mask.astype(np.uint8), structure=struct); 
+        green_infos = []
+        # Finds all green objects and sorts them by their area in descending order
+        green_clusters_info = sorted([(cid, (lab_green == cid).sum()) for cid in range(1, n_green + 1)], key=lambda item: item[1], reverse=True)
+        # only the two largest green objects
+        for cid, area in green_clusters_info[:2]:
+            idx_green = (lab_green == cid); 
+            pts_green = pc_world.reshape(-1, 3)[idx_green.flatten()]; 
+            pts_green = pts_green[np.isfinite(pts_green).all(axis=1)]
+            if pts_green.shape[0] == 0: continue
+            centroid_xy_green = np.nanmedian(pts_green[:, :2], axis=0); 
+            top_z_green = float(np.nanpercentile(pts_green[:, 2], 95)); 
+            low_z_green = float(np.nanpercentile(pts_green[:, 2], 5))
+            stats = {"centroid_xy": centroid_xy_green, "top_z": top_z_green, "low_z": low_z_green, "size_xy": np.nanpercentile(pts_green[:, :2], 95, axis=0) - np.nanpercentile(pts_green[:, :2], 5, axis=0)}
+            # calculates the Euclidean distance from the current green object's centroid to a fixed reference point in the world ([0.5, 0.0])
+            d_center = float(np.linalg.norm(stats["centroid_xy"] - np.array([0.5, 0.0])))
+            green_infos.append({"cid": cid, "area": area, "stats": stats, "d_center": d_center})
+
+        # 1. Sort by d_center in ascending order, 2. Sorting by area in descending order.
+        green_infos.sort(key=lambda it: (it["d_center"], -it["area"])); 
+        # first item in the list (green_infos[0]) is designated as the base block
+        base_info, top_info = green_infos[0], green_infos[1]
+        base_stats, top_stats = base_info["stats"], top_info["stats"]
+        # green_edge = np.mean([np.clip(float(np.mean(np.abs(s["size_xy"]))), 0.03, 0.06) for s in [base_stats, top_stats]])
+        green_edge = 0.05
+        # Estimating the Table Height
+        z_table_est = float(np.nanpercentile(pc_world[..., 2].reshape(-1), 1.0))
         
-        lab_red, n_red = label(red_mask.astype(np.uint8), structure=struct)
-        red_clusters = []
-        if n_red > 0:
-            for i in range(1, n_red + 1):
-                idx = (lab_red == i)
-                red_clusters.append((i, int(idx.sum()), idx))
-            red_clusters.sort(key=lambda t: t[1], reverse=True)
         
-        if red_clusters:
-            _, _, largest_red_mask = red_clusters[0]
-            # Inlined `cluster_stats_from_pc` for red
-            idx = largest_red_mask.reshape(-1)
-            pts = pc_world.reshape(-1, 3)[idx]
-            pts = pts[np.isfinite(pts).all(axis=1)]
-            if pts.shape[0] > 0:
-                xy = pts[:, :2]
-                z = pts[:, :2]
-                centroid_xy = np.nanmedian(xy, axis=0)
-                top_z = float(np.nanpercentile(z, 95))
-                low_z = float(np.nanpercentile(z, 5))
-                red_centroid = np.array([centroid_xy[0], centroid_xy[1], (top_z + low_z) / 2.0])
-                print(f"CALCULATED RED CUBE CENTROID : {red_centroid}")
-
-        # --- Process Green Cubes ---
-        green_centroids = []
-        # Inlined `clusters_from_mask` for green
-        lab_green, n_green = label(green_mask.astype(np.uint8), structure=struct)
-        green_clusters = []
-        if n_green > 0:
-            for i in range(1, n_green + 1):
-                idx = (lab_green == i)
-                green_clusters.append((i, int(idx.sum()), idx))
-            green_clusters.sort(key=lambda t: t[1], reverse=True)
-
-        if green_clusters:
-            for _, _, cluster_mask in green_clusters:
-                # Inlined `cluster_stats_from_pc` for each green cluster
-                idx = cluster_mask.reshape(-1)
-                pts = pc_world.reshape(-1, 3)[idx]
-                pts = pts[np.isfinite(pts).all(axis=1)]
-                if pts.shape[0] > 0:
-                    xy = pts[:, :2]
-                    z = pts[:, :2]
-                    centroid_xy = np.nanmedian(xy, axis=0)
-                    top_z = float(np.nanpercentile(z, 95))
-                    low_z = float(np.nanpercentile(z, 5))
-                    green_centroids.append(np.array([centroid_xy[0], centroid_xy[1], (top_z + low_z) / 2.0]))
-
-
-        if red_centroid is not None:
-            # 定义关键高度
-            pre_grasp_height = 0.12  # 预抓取高度：立方体上方10厘米
-            grasp_height = 0.03      # 抓取高度：立方体上方2厘米
-            GRIPPER_OPEN_POS = 0.04    # 夹爪完全张开的位置 (m)
-            GRIPPER_CLOSED_POS = 0.0   # 夹爪完全闭合的位置 (m)
-            PRE_MOVE_HEIGHT = 0.12 # Safe height for moves
-
-             # The best base is the one most isolated from other cubes, offering more room to maneuver.
-            best_base = None
-            max_isolation_dist = -1
-            all_cubes = [red_centroid] + green_centroids
-            for candidate_base in green_centroids:
-                dist_sum = 0
-                for other_cube in all_cubes:
-                    if not np.array_equal(candidate_base, other_cube):
-                        dist_sum += np.linalg.norm(candidate_base - other_cube)
-                if dist_sum > max_isolation_dist:
-                    max_isolation_dist = dist_sum
-                    best_base = candidate_base
-            base_green_cube = best_base
-
-            remaining_green = [gc for gc in green_centroids if not np.array_equal(gc, base_green_cube)]
-            top_green_cube = remaining_green[0]
-            print(f"Base green cube selected at: {base_green_cube}")
-            print(f"Top green cube selected at: {top_green_cube}")
-
-            avg_obstacle_vector = np.array([0.0, 0.0, 0.0])
-            if green_centroids:
-                for gc in green_centroids:
-                    avg_obstacle_vector += (gc - red_centroid)
-                avg_obstacle_vector /= len(green_centroids)
-
-            if np.linalg.norm(avg_obstacle_vector) > 1e-6:
-                approach_vector = -avg_obstacle_vector
-            else:
-                approach_vector = np.array([1.0, 0.0, 0.0])
+        if centroid_xy_red is not None:
             
-            # 将接近向量投影到XY平面并归一化
-            approach_vector_xy = approach_vector[:2] / np.linalg.norm(approach_vector[:2])
-            # 定义夹爪自身的坐标系
-            z_axis = np.array([0.0, 0.0, -1.0]) # Z轴永远指向正下方
-            x_axis = np.array([approach_vector_xy[0], approach_vector_xy[1], 0.0]) # X轴（前方）对准接近方向
-            y_axis = np.cross(z_axis, x_axis) # Y轴（侧方）通过叉乘计算得出
+            GRIPPER_OPEN_POS = 0.04   # position value for an open gripper
+            GRIPPER_CLOSED_POS = 0.0  # position value for a closed gripper
+            place_clearance = 0.015   # safety distance to ensure gripper doesn't collide with the surface 
 
-            # 构建旋转矩阵并转换为四元数
-            rotation_matrix = np.vstack([x_axis, y_axis, z_axis]).T
-            quat_xyzw = Rotation.from_matrix(rotation_matrix).as_quat()
-            target_quat_wxyz = np.array([quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]])
+            # Calculates the height of the red block
+            h_red = max(0.01, red_stats["top_z"] - red_stats["low_z"])
+            # Determines the optimal Z-coordinate for grasping
+            grasp_z_red = max(z_table_est + 0.45 * h_red, red_stats["top_z"] - grasp_depth)
 
-            fixed_orientation = Rotation.from_euler('xyz', [180, 0, 90], degrees=True).as_quat()[[3, 0, 1, 2]]
+            hover_pos_red = np.array([red_stats["centroid_xy"][0], red_stats["centroid_xy"][1], red_stats["top_z"] + hover_offset])
+            grasp_pos_red = np.array([red_stats["centroid_xy"][0], red_stats["centroid_xy"][1], grasp_z_red])
+            lift_pos_red = np.array([red_stats["centroid_xy"][0], red_stats["centroid_xy"][1], red_stats["top_z"] + lift_offset])
 
+            # Open the gripper
             self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_OPEN_POS, count=50)
-            self.sim_wait(30)
-
-            pre_grasp_pos = red_centroid + np.array([0.0, 0.0, pre_grasp_height])
-            pre_grasp_pose = np.concatenate([pre_grasp_pos, target_quat_wxyz])
-            self.move_robot_ik(pre_grasp_pose)
-            self.sim_wait(30)
-
-            grasp_pos = red_centroid + np.array([0.0, 0.0, grasp_height])
-            grasp_pose = np.concatenate([grasp_pos, target_quat_wxyz])
-            self.move_robot_ik(grasp_pose)
-            self.sim_wait(30)
-  
+            self.move_robot_ik(np.concatenate([hover_pos_red, self.robot_quat]))
+            self.move_robot_ik(np.concatenate([grasp_pos_red, self.robot_quat]))
+            self.sim_wait(5)
             self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_CLOSED_POS, count=50)
-            self.sim_wait(50)
+            self.sim_wait(5)
+            self.move_robot_ik(np.concatenate([lift_pos_red, self.robot_quat]))
+            self.sim_wait(5)
 
-            print("Picking the red cube")
-            self.move_robot_ik(pre_grasp_pose) # Move back up to the pre-grasp height
-            self.sim_wait(50)
-            CUBE_HEIGHT = 0.04
-            print("Placeing the red cube")
-            place_pos_red = base_green_cube + np.array([0, 0, CUBE_HEIGHT+0.015])
-            pre_place_pos = place_pos_red + np.array([0.0, 0.0, PRE_MOVE_HEIGHT])
-            # self.move_robot_ik(np.concatenate([pre_place_pos, fixed_orientation])); self.sim_wait(50)
-            self.move_robot_ik(np.concatenate([pre_place_pos, fixed_orientation])); self.sim_wait(50)
-            self.move_robot_ik(np.concatenate([place_pos_red, fixed_orientation])); self.sim_wait(50)
-            self.move_robot_joint(None, GRIPPER_OPEN_POS, count=50); self.sim_wait(50)
-            self.move_robot_ik(np.concatenate([pre_place_pos, fixed_orientation])); self.sim_wait(40)
+            # Z-coordinate for the center of the red block when it's placed
+            target_center_z_red = float(base_stats["top_z"] + 0.65 * red_edge + place_clearance)
+            # Z-coordinate to retract to after placing the block
+            post_lift_z_red = float(base_stats["top_z"] + red_edge + lift_offset)
 
-            # === MOVE 2: Place TOP GREEN cube on RED cube ===
-            print(f"--- Picking TOP GREEN cube at {top_green_cube} ---")
-            pre_grasp_pos = top_green_cube + np.array([0.0, 0.0, PRE_MOVE_HEIGHT])
-            grasp_pos = top_green_cube + np.array([0.0, 0.0, grasp_height])
-            self.move_robot_ik(np.concatenate([pre_grasp_pos, fixed_orientation])); self.sim_wait(40)
-            self.move_robot_ik(np.concatenate([grasp_pos, fixed_orientation])); self.sim_wait(40)
-            self.move_robot_joint(None, GRIPPER_CLOSED_POS, count=50); self.sim_wait(50)
-            self.move_robot_ik(np.concatenate([pre_grasp_pos, fixed_orientation])); self.sim_wait(40)
+            hover_place_pos_red = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], target_center_z_red + hover_offset])
+            place_pos_red = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], target_center_z_red])
+            post_place_pos_red = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], post_lift_z_red])
             
-            place_pos_green_top = base_green_cube + np.array([0, 0, CUBE_HEIGHT * 2+0.01])
-            print(f"--- Placing TOP GREEN cube at {place_pos_green_top} ---")
-            pre_place_pos = place_pos_green_top + np.array([0.0, 0.0, PRE_MOVE_HEIGHT])
-            self.move_robot_ik(np.concatenate([pre_place_pos, fixed_orientation])); self.sim_wait(50)
-            self.move_robot_ik(np.concatenate([place_pos_green_top, fixed_orientation])); self.sim_wait(50)
-            self.move_robot_joint(None, GRIPPER_OPEN_POS, count=50); self.sim_wait(50)
-            self.move_robot_ik(np.concatenate([pre_place_pos, fixed_orientation])); self.sim_wait(40)
+            self.move_robot_ik(np.concatenate([hover_place_pos_red, self.robot_quat])) 
+            self.move_robot_ik(np.concatenate([place_pos_red, self.robot_quat])) 
+            self.sim_wait(5)
+            self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_OPEN_POS, count=50)
+            self.sim_wait(5)
+            self.move_robot_ik(np.concatenate([post_place_pos_red, self.robot_quat])) 
+            self.sim_wait(5)
+            
+            h_green_top = max(0.01, top_stats["top_z"] - top_stats["low_z"])
+            grasp_z_green = max(z_table_est + 0.4 * h_green_top, top_stats["top_z"] - grasp_depth)
 
-            print(">>> STACKING SEQUENCE COMPLETE! <<<")
+            hover_pos_green = np.array([top_stats["centroid_xy"][0], top_stats["centroid_xy"][1], top_stats["top_z"] + hover_offset])
+            grasp_pos_green = np.array([top_stats["centroid_xy"][0], top_stats["centroid_xy"][1], grasp_z_green])
+            lift_pos_green = np.array([top_stats["centroid_xy"][0], top_stats["centroid_xy"][1], top_stats["top_z"] + lift_offset])
+
+            self.move_robot_ik(np.concatenate([hover_pos_green, self.robot_quat])); 
+            self.move_robot_ik(np.concatenate([grasp_pos_green, self.robot_quat])); 
+            self.sim_wait(5)
+            self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_CLOSED_POS, count=50) 
+            self.sim_wait(5)
+            self.move_robot_ik(np.concatenate([lift_pos_green, self.robot_quat])) 
+            self.sim_wait(5)
+
+            red_top_after_place = base_stats["top_z"] + red_edge
+            target_center_z_green = float(red_top_after_place + 0.6 * green_edge + place_clearance)
+            post_lift_z_green = float(red_top_after_place + green_edge + lift_offset)
+
+            hover_place_pos_green = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], target_center_z_green + hover_offset])
+            place_pos_green = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], target_center_z_green])
+            post_place_pos_green = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], post_lift_z_green])
+
+            self.move_robot_ik(np.concatenate([hover_place_pos_green, self.robot_quat])); 
+            self.sim_wait(5)
+            self.move_robot_ik(np.concatenate([place_pos_green, self.robot_quat])); 
+            self.sim_wait(5)
+            self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_OPEN_POS, count=50)
+            self.sim_wait(5)
+            self.move_robot_ik(np.concatenate([post_place_pos_green, self.robot_quat])); self.sim_wait(10)
 
         # steps simulation but does not command the robot
         while simulation_app.is_running():
@@ -511,75 +501,3 @@ if __name__ == "__main__":
 
     exp = Experiment()
     exp.run()
-
-"""
- hsv = cv2.cvtColor(color, cv2.COLOR_RGB2HSV)
-
-        lower_red1 = np.array([0, 80, 40])
-        upper_red1 = np.array([10, 255, 255])
-        lower_red2 = np.array([165, 80, 40])
-        upper_red2 = np.array([180, 255, 255])
-        lower_green = np.array([35, 70, 30])
-        upper_green = np.array([85, 255, 255])
-
-        mask_red1 =cv2.inRange(hsv, lower_red1, upper_red1) # check every element in hsv, whether it is staying between lower bound and opper bound
-        # if satisfied with three condition(h,s,v), set it to 255
-        mask_red2 =cv2.inRange(hsv, lower_red2, upper_red2)
-        red_mask = cv2.bitwise_or(mask_red1, mask_red2) # Combined 2 masks
-        green_mask = cv2.inRange(hsv, lower_green, upper_green)
-
-        # Add this after you create the masks
-        kernel = np.ones((5,5), np.uint8) # Define a 5x5 kernel for the operations
-
-# Clean up the red mask
-        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_OPEN, kernel)
-        red_mask = cv2.morphologyEx(red_mask, cv2.MORPH_CLOSE, kernel)
-
-# Clean up the green mask
-        green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_OPEN, kernel)
-        green_mask = cv2.morphologyEx(green_mask, cv2.MORPH_CLOSE, kernel)
-        """
-"""
-# red_centroid = np.mean(red_points, axis=0)
-        if red_points.shape[0] > 0:
-            r_top_z = np.max(red_points[:, 2])
-
-            # 2. The X and Y of the center is the average of the visible points
-            valid_r_points=red_points[red_points[:,2] >= (r_top_z - 0.04)]
-            r_center_x = np.median(valid_r_points[:, 0])
-            
-            r_center_y = np.mean(red_points[:, 1])
-
-            # 3. The true Z center is half a cube height below the top surface
-            r_center_z = r_top_z - (r_CUBE_HEIGHT / 2.0)
-
-                # 4. Assemble the corrected, more accurate centroid
-            red_centroid = np.array([r_center_x, r_center_y, r_center_z])
-            print(f"CALCULATED RED CUBE CENTROID : {red_centroid}")   
-
-        # Find centroids for all green obstacles
-        green_centroids = []
-        CUBE_HEIGHT = 0.05
-        labeled_mask, num_features = ndimage.label(green_mask)
-        if num_features > 0:
-   
-            for i in range(1, num_features + 1):
-                blob_mask = (labeled_mask.flatten() == i)
-                green_points = points_world[blob_mask]
-                if green_points.shape[0] > 0:
-                    top_z = np.max(green_points[:, 2])
-                    valid_g_points=green_points[green_points[:,2] >= (top_z - 0.05)]
-                    center_x = np.median(valid_g_points[:, 0])
-                    center_y = np.mean(green_points[:, 1])
-                    center_z = top_z - (CUBE_HEIGHT / 2.0)
-                    corrected_centroid = np.array([center_x, center_y, center_z])
-                    green_centroids.append(corrected_centroid)
-        """
-"""
-extrinsics = np.array([
-            [ 0,  1,  0, 0],
-            [ -1,  0,  0,  0.5],
-            [ 0,  0, -1, 1.2],
-            [ 0,  0,  0,   1]
-        ])
-        """
