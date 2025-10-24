@@ -255,51 +255,52 @@ class Experiment:
         #plt.imshow(color)
         
         # TODO: move the robot to make the stack
-
-        # --- Q1: HSV 颜色阈值 (0~1) 与形态学操作参数 ---
+        # h_ : Hue ranges for detecting red and green in the HSV color space
         h_red_low_1 = 0.00
         h_red_high_1 = 0.04
         h_red_low_2 = 0.96
         h_red_high_2 = 1.00
         h_green_low = 0.23
         h_green_high = 0.44
+        # minimum thresholds for Saturation (S) and Value (V)
         s_min = 0.40
         v_min = 0.20
+        # The number of iterations for morphological image processing operations, which are used to clean up noise
         morph_iters = 2
-
-        # --- Q3: 抓取控制 ---
         hover_offset = 0.12
         lift_offset = 0.15
         grasp_depth = 0.02
         
-
+        # Ensures the image is in a standard RGB format
         color = color_raw[:, :, :3] if color_raw.shape[2] == 4 else color_raw
         
-       
         height, width, _ = color.shape
+        # distance of each pixel from the camera, remove any extra,single-value dimensions
         depth_image = np.squeeze(self.scene["birdview_camera"].data.output["depth"].detach().cpu().numpy()[0])
         # Convert RGB to HSV color space
-        rgb01 = np.clip(color.astype(np.float32)/255.0, 0.0, 1.0)
+        rgb01 = np.clip(color.astype(np.float32)/255.0, 0.0, 1.0) # Normalize it
         hsv = mcolors.rgb_to_hsv(rgb01)
         h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
         
-        s_min, v_min, morph_iters = 0.40, 0.20, 2
+        # initial binary masks
         red1_raw = (h >= h_red_low_1) & (h <= h_red_high_1) & (s >= s_min) & (v >= v_min)
         red2_raw = (h >= h_red_low_2) & (h <= h_red_high_2) & (s >= s_min) & (v >= v_min)
         red_mask_raw = red1_raw | red2_raw
         green_mask_raw = (h >= h_green_low) & (h <= h_green_high) & (s >= s_min) & (v >= v_min)
 
+        # 3x3 square where all elements are considered neighbors
         struct = generate_binary_structure(2, 2)
+        # removes small, isolated bright spots
         red_mask = binary_opening(red_mask_raw, structure=struct, iterations=morph_iters)
+        # fills any black holes inside a larger white object
         red_mask = binary_fill_holes(red_mask)
+        # fills small gaps and holes within an object
         red_mask = binary_closing(red_mask, structure=struct, iterations=max(1, morph_iters // 2))
         green_mask = binary_opening(green_mask_raw, structure=struct, iterations=morph_iters)
         green_mask = binary_fill_holes(green_mask)
         green_mask = binary_closing(green_mask, structure=struct, iterations=max(1, morph_iters // 2))
         
-
-# Now your red_mask and green_mask are much cleaner!
-
+        # Visualizing the 2D Masks
         fig, axs = plt.subplots(1, 3, figsize=(15, 5))
         axs[0].imshow(color)
         axs[0].set_title('Original Image')
@@ -310,33 +311,31 @@ class Experiment:
         plt.savefig("color_masks.png") # Save the figure instead
         plt.close()
 
-        
+        # Creating a 3D Point Cloud
         height, width = depth_image.shape
-        #
-
+        
+        # focal lengths of the camera lens
         fx = intrinsics[0,0]
         fy = intrinsics[1,1]
+        # principal point
         cx = intrinsics[0,2]
         cy = intrinsics[1,2]
-        # test
+        # row index (y-coordinate) and column index (x-coordinate) at each position
         y_pixel, x_pixel = np.meshgrid(np.arange(height), np.arange(width), indexing="ij")
-     
+        # Turns 2D pixels into 3D points in the camera's coordinate system.
         z_c = depth_image
         x_c = z_c * (x_pixel - cx) / fx
         y_c = z_c * (y_pixel - cy) / fy
 
-        points_camera = np.stack((x_c, y_c, z_c), axis=-1).reshape(-1, 3) #flat pc
-        
+        points_camera = np.stack((x_c, y_c, z_c), axis=-1).reshape(-1, 3) 
+        # transforms the points from the camera's coordinate system to the global world coordinate system.
         ones = np.ones((points_camera.shape[0], 1), dtype=points_camera.dtype)
         points_world_h = extrinsics @ np.concatenate([points_camera, ones], axis=1).T
-        pc_world = (points_world_h[:3, :] / np.clip(points_world_h[3, :], 1e-8, None)).T.reshape(height, width, 3)
-        #
-
-       
+               
         points_world = (points_world_h[:3,:] / np.clip(points_world_h[3,:], 1e-8, None)).T
-        
         pc_world = points_world.reshape(height, width, 3)
-        #
+        
+        # flatten the 2D masks into 1D arrays
         red_pixels = red_mask.flatten().astype(bool)
         green_pixels = green_mask.flatten().astype(bool)
        
@@ -363,22 +362,31 @@ class Experiment:
         plt.savefig("scene_point_cloud.png")
         plt.close(fig)
 
-        
-        # test
+        # Scans the mask and finds all separate, contiguous white regions, assigning a unique ID to each one.
         lab_red, n_red = label(red_mask.astype(np.uint8), structure=struct); 
+        # Find the largest red object by area
         red_cid_main, _ = max([(cid, (lab_red == cid).sum()) for cid in range(1, n_red + 1)], key=lambda item: item[1])
+        # boolean mask where only the pixels belonging to the largest red object are True
         idx_red = (lab_red == red_cid_main).reshape(-1); 
+        # selects 3D points from the full-scene point cloud that correspond to the largest red object
         pts_red = pc_world.reshape(-1, 3)[idx_red]; 
+        # removes any points have invalid coordinate values
         pts_red = pts_red[np.isfinite(pts_red).all(axis=1)]
+        # calculates the centroid of the red object in the XY plane.
         centroid_xy_red = np.nanmedian(pts_red[:, :2], axis=0); 
+        # Finds the 95th and 5th percentile of all Z-coordinates.
         top_z_red = float(np.nanpercentile(pts_red[:, 2], 95)); 
         low_z_red = float(np.nanpercentile(pts_red[:, 2], 5))
+        # Gathers all the computed statistics into a dictionary
         red_stats = {"centroid_xy": centroid_xy_red, "top_z": top_z_red, "low_z": low_z_red, "size_xy": np.nanpercentile(pts_red[:, :2], 95, axis=0) - np.nanpercentile(pts_red[:, :2], 5, axis=0)}
-        red_edge = np.clip(float(np.mean(np.abs(red_stats["size_xy"]))), 0.03, 0.06)
+        # red_edge = np.clip(float(np.mean(np.abs(red_stats["size_xy"]))), 0.03, 0.06)
+        red_edge = 0.04
 
         lab_green, n_green = label(green_mask.astype(np.uint8), structure=struct); 
         green_infos = []
+        # Finds all green objects and sorts them by their area in descending order
         green_clusters_info = sorted([(cid, (lab_green == cid).sum()) for cid in range(1, n_green + 1)], key=lambda item: item[1], reverse=True)
+        # only the two largest green objects
         for cid, area in green_clusters_info[:2]:
             idx_green = (lab_green == cid); 
             pts_green = pc_world.reshape(-1, 3)[idx_green.flatten()]; 
@@ -388,13 +396,17 @@ class Experiment:
             top_z_green = float(np.nanpercentile(pts_green[:, 2], 95)); 
             low_z_green = float(np.nanpercentile(pts_green[:, 2], 5))
             stats = {"centroid_xy": centroid_xy_green, "top_z": top_z_green, "low_z": low_z_green, "size_xy": np.nanpercentile(pts_green[:, :2], 95, axis=0) - np.nanpercentile(pts_green[:, :2], 5, axis=0)}
+            # calculates the Euclidean distance from the current green object's centroid to a fixed reference point in the world ([0.5, 0.0])
             d_center = float(np.linalg.norm(stats["centroid_xy"] - np.array([0.5, 0.0])))
             green_infos.append({"cid": cid, "area": area, "stats": stats, "d_center": d_center})
+        # 1. Sort by d_center in ascending order, 2. Sorting by area in descending order.
         green_infos.sort(key=lambda it: (it["d_center"], -it["area"])); 
+        # first item in the list (green_infos[0]) is designated as the base block
         base_info, top_info = green_infos[0], green_infos[1]
         base_stats, top_stats = base_info["stats"], top_info["stats"]
-        green_edge = np.mean([np.clip(float(np.mean(np.abs(s["size_xy"]))), 0.03, 0.06) for s in [base_stats, top_stats]])
-
+        # green_edge = np.mean([np.clip(float(np.mean(np.abs(s["size_xy"]))), 0.03, 0.06) for s in [base_stats, top_stats]])
+        green_edge = 0.05
+        # Estimating the Table Height
         z_table_est = float(np.nanpercentile(pc_world[..., 2].reshape(-1), 1.0))
         #
         
