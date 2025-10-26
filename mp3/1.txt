@@ -1,0 +1,1 @@
+C:\isaacsim\python.bat keyboard_teleop.py --enable_camera
