@@ -322,12 +322,13 @@ class RobotKeyboardController:
 
 
             # TODO: apriltag detection and calib dataset collection
+            # Gets the camera's intrinsic matrix
             intrinsics = np.squeeze(self.scene["wrist_camera"].data.intrinsic_matrices.detach().cpu().numpy())
+            # Gets the RGBA image from the wrist camera
             wrist_cam_img = self.scene["wrist_camera"].data.output["rgb"].detach().cpu().numpy()[0]
 
 
-            # --- Start of Added Code for Q1 ---
-
+            # Q1
             # Convert RGBA image from Isaac Lab to grayscale for AprilTag detection
             gray_img = cv2.cvtColor(wrist_cam_img, cv2.COLOR_RGBA2GRAY)
 
@@ -347,15 +348,16 @@ class RobotKeyboardController:
             # Create a color image from the RGBA buffer for visualization using OpenCV
             vis_img = cv2.cvtColor(wrist_cam_img, cv2.COLOR_RGBA2BGR)
 
+            # Create a boolean falg, which is true only on when the b key is first pressed
             save_attempted = self.b_pressed and not save_key_was_down
+
             # Loop over detected tags and draw visualizations
             for tag in detections:
                 # Draw the bounding box (in green)
-                corners = tag.corners.astype(int)
+                corners = tag.corners.astype(int) # Gets the four corner points of the tag
                 cv2.polylines(vis_img, [corners], isClosed=True, color=(0, 255, 0), thickness=2)
 
                 # Get the estimated pose (rotation matrix and translation vector)
-                # This is the transform from the tag's frame to the camera's frame
                 pose_R, pose_t = tag.pose_R, tag.pose_t
 
                 # Convert rotation matrix to rotation vector for OpenCV's projectPoints function
@@ -389,7 +391,7 @@ class RobotKeyboardController:
                     T_cam_tag[:3, :3] = tag.pose_R
                     T_cam_tag[:3, 3] = tag.pose_t.flatten()
 
-                    self.eef_poses.append(T_world_eef)
+                    self.eef_poses.append(T_world_eef) # end-effector's pose
                     self.tag_poses.append(T_cam_tag)
 
                     # Save the annotated image
@@ -400,13 +402,16 @@ class RobotKeyboardController:
                     plt.pause(0.001)
                     self.fig.canvas.draw()
 
-                    print(f"✅ SAVED POSE #{len(self.eef_poses)} and image '{image_filename}'")
+                    print(f"SAVED POSE #{len(self.eef_poses)}/15 and image '{image_filename}'")
+                    if len(self.eef_poses) == 15:
+                        self.solve_and_save_calibration()
+                        self.calibration_done = True # Set flag to prevent re-running
                 else:
                     # Provide feedback if 'b' is pressed but no tag is visible
                     self.im.set_data(vis_img)
                     plt.pause(0.001)
                     self.fig.canvas.draw()
-                    print("⚠️ Save key pressed, but NO AprilTag detected!")
+                    print("Save key pressed, but NO AprilTag detected!")
 
             # Update the key state at the end of the frame to prevent multiple saves
             save_key_was_down = self.b_pressed
@@ -414,6 +419,7 @@ class RobotKeyboardController:
             vis_img_rgb = cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)
 
             # --- End of Added Code ---
+
             # visualize
             #self.im.set_data(vis_img_rgb)
             #self.im.set_data(wrist_cam_img)
@@ -424,6 +430,62 @@ class RobotKeyboardController:
             self.scene.write_data_to_sim()
             self.sim.step()
             self.scene.update(self.sim_dt)
+
+    def solve_and_save_calibration(self):
+        """
+        Saves the collected pose data to a file and solves for the hand-eye
+        transformation matrix (AX=XB).
+        """
+        # 1. Save the collected data to a .npz file
+        print(f"Reached 15 poses! Saving data and starting calibration...")
+        filepath = "calibration_data.npz"
+        np.savez(
+            filepath,
+            eef_poses=np.array(self.eef_poses),
+            tag_poses=np.array(self.tag_poses),
+        )
+        print(f"Data saved to '{filepath}'")
+
+        # 2. Prepare the relative motion matrices for the solver
+        R_gripper2base = []
+        t_gripper2base = []
+        R_target2cam = []
+        t_target2cam = []
+
+        for i in range(len(self.eef_poses) - 1):
+            # A: Relative motion of the end-effector
+            T_world_eef1 = self.eef_poses[i]
+            T_world_eef2 = self.eef_poses[i+1]
+            T_eef1_eef2 = np.linalg.inv(T_world_eef1) @ T_world_eef2
+            
+            R_gripper2base.append(T_eef1_eef2[:3, :3])
+            t_gripper2base.append(T_eef1_eef2[:3, 3].reshape(3, 1))
+
+            # B: Relative motion of the tag with respect to the camera
+            T_cam_tag1 = self.tag_poses[i]
+            T_cam_tag2 = self.tag_poses[i+1]
+            T_tag1_tag2 = T_cam_tag1 @ np.linalg.inv(T_cam_tag2)
+
+            R_target2cam.append(T_tag1_tag2[:3, :3])
+            t_target2cam.append(T_tag1_tag2[:3, 3].reshape(3, 1))
+
+        # 3. Solve for X (T_eef_cam) using OpenCV
+        R_cam2gripper, t_cam2gripper = cv2.calibrateHandEye(
+            R_gripper2base=R_gripper2base,
+            t_gripper2base=t_gripper2base,
+            R_target2cam=R_target2cam,
+            t_target2cam=t_target2cam,
+            method=cv2.CALIB_HAND_EYE_TSAI
+        )
+
+        # 4. Assemble and report the final transformation matrix
+        T_eef_cam = np.eye(4)
+        T_eef_cam[:3, :3] = R_cam2gripper
+        T_eef_cam[:3, 3] = t_cam2gripper.flatten()
+
+        np.set_printoptions(precision=4, suppress=True)
+        print("This is the pose of the camera in the robot's end-effector frame.\n")
+        print(T_eef_cam)
 
 
 if __name__ == "__main__":
