@@ -222,7 +222,9 @@ class Experiment:
         self.robot_pos = self.robot_pose[:3]
         self.robot_quat = self.robot_pose[3:]
 
-    def capture_and_process_frame(self, cam_intrinsics, T_eef_cam, save_visualization=False, view_name=""):
+    def capture_and_process_frame(self, cam_intrinsics, T_eef_cam, 
+                                  current_eef_pos, current_eef_quat, # <-- MODIFIED: Added arguments
+                                  save_visualization=False, view_name=""):
         """Capture RGB-D frame, process to point cloud, and transform to world coordinates"""
         # Get camera data
         wrist_camera = self.scene.sensors["wrist_camera"]
@@ -233,7 +235,7 @@ class Experiment:
         rgb_o3d = o3d.geometry.Image(rgb)
         depth_o3d = o3d.geometry.Image(depth)
 
-        # Create RGBD image and point cloud
+        # Create RGBD image
         rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
             rgb_o3d, depth_o3d, depth_scale=1.0, depth_trunc=0.7, convert_rgb_to_intensity=False
         )
@@ -241,38 +243,28 @@ class Experiment:
         # Create point cloud from RGBD image
         pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, cam_intrinsics)
         
-        # ==================== MODIFIED SECTION ====================
-        # We need to filter out the robot's own gripper, which is very close to the camera.
-        # We will add a *minimum depth* filter.
-        # Points in 'pcd' are in the camera frame, so pcd.points[:, 2] is the depth.
-        
-        # 1. Get points and colors from the unfiltered cloud
+        # Filter points (your logic from previous step)
         points_cam_frame = np.asarray(pcd.points)
         colors = np.asarray(pcd.colors)
-
-        # 2. Create the color threshold mask (your original logic)
         color_mask = (colors[:, 0] > 0.5) & (colors[:, 1] < 0.4) & (colors[:, 2] < 0.4)
-
-        # 3. Create a minimum depth threshold mask (filter out gripper)
-        # We filter any point closer than 10cm (0.1 meters)
         MIN_DEPTH = 0.1 
         depth_mask = (points_cam_frame[:, 2] > MIN_DEPTH)
-        
-        # 4. Combine the masks
-        # We want points that are BOTH red AND far enough away
         combined_mask = color_mask & depth_mask
-        
-        # 5. Apply the combined mask to the point cloud
         pcd = pcd.select_by_index(np.where(combined_mask)[0])
-        # ================== END MODIFIED SECTION ==================
-        # Get end-effector pose in world frame
-        eef_pos = self.robot_pos
-        eef_quat = self.robot_quat  # [qw, qx, qy, qz]
+
+        # ==================== MODIFIED SECTION ====================
+        # Get end-effector pose in world frame from arguments
+        eef_pos = current_eef_pos.cpu().numpy()      # Use argument, convert to numpy
+        eef_quat_wxyz = current_eef_quat.cpu().numpy() # Use argument, convert to numpy
         
         # Create transformation matrix from end-effector to world
         T_world_eef = np.eye(4)
-        T_world_eef[:3, :3] = R.from_quat([eef_quat[1], eef_quat[2], eef_quat[3], eef_quat[0]]).as_matrix()
+        
+        # Convert quaternion [w, x, y, z] to [x, y, z, w] for scipy
+        eef_quat_xyzw = [eef_quat_wxyz[1], eef_quat_wxyz[2], eef_quat_wxyz[3], eef_quat_wxyz[0]]
+        T_world_eef[:3, :3] = R.from_quat(eef_quat_xyzw).as_matrix()
         T_world_eef[:3, 3] = eef_pos
+        # ================== END MODIFIED SECTION ==================
 
         # Transform point cloud to world coordinates: T_world_cam = T_world_eef * T_eef_cam
         T_world_cam = T_world_eef @ T_eef_cam
@@ -280,7 +272,7 @@ class Experiment:
 
         # Save visualization if requested
         if save_visualization and view_name:
-            # Save RGB and depth images
+            # ... (saving logic remains the same) ...
             plt.figure(figsize=(10, 5))
             plt.subplot(121)
             plt.imshow(rgb)
@@ -290,8 +282,6 @@ class Experiment:
             plt.title(f'Depth Image - {view_name}')
             plt.savefig(f'vase_{view_name}_rgbd.png')
             plt.close()
-
-            # Save point cloud visualization
             o3d.visualization.draw_geometries([pcd], window_name=f'Vase Point Cloud - {view_name}')
             o3d.io.write_point_cloud(f'vase_{view_name}_pcd.ply', pcd)
 
@@ -344,6 +334,17 @@ class Experiment:
             simulation_app.close()
             return
 
+        try:
+            # The robot asset is named 'ur5e' in your scene config
+            robot_articulation = self.scene.articulations["ur5e"]
+            # The camera is attached to 'gripper_center' in your scene config
+            eef_body_name = "gripper_center"
+            eef_index = robot_articulation.body_names.index(eef_body_name)
+        except (KeyError, ValueError, AttributeError) as e:
+            print(f"错误: 无法找到机器人 'ur5e' 或末端执行器连杆 '{eef_body_name}'. {e}")
+            print(f"ERROR: Could not find robot 'ur5e' or end-effector link '{eef_body_name}'. {e}")
+            simulation_app.close()
+            return
         # TODO: Pose estimation and grasping
         # Define target poses for capturing multiple views
         # These poses are chosen to环绕花瓶, covering different angles and heights
@@ -392,11 +393,19 @@ class Experiment:
             # Move robot to target pose
             self.move_robot_ik(target_pose)
             self.sim_wait(20)  # Settle before capturing
-            
+            # === MODIFIED: Manually get the CURRENT robot pose ===
+            # We must get the pose *after* sim_wait, as this is when the robot has arrived
+            # The .data attribute is updated by scene.update() (which sim_wait calls)
+            robot_data = robot_articulation.data
+            current_eef_pos = robot_data.body_pos_w[0, eef_index]   # Get pos from tensor
+            current_eef_quat = robot_data.body_quat_w[0, eef_index] # Get quat from tensor [w, x, y, z]
+            # === END MODIFIED ===
             # Capture and process frame
-            pcd = self.capture_and_process_frame(cam_intrinsics, T_eef_cam, save_visualization=True, view_name=view_name)
-            self.world_point_clouds.append(pcd)
-
+            pcd = self.capture_and_process_frame(
+                cam_intrinsics, T_eef_cam, 
+                current_eef_pos, current_eef_quat,  # <-- MODIFIED: Pass new args
+                save_visualization=True, view_name=view_name
+            )
         # Combine all point clouds
         combined_pcd = o3d.geometry.PointCloud()
         for pcd in self.world_point_clouds:
