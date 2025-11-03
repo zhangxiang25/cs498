@@ -235,17 +235,36 @@ class Experiment:
 
         # Create RGBD image and point cloud
         rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            rgb_o3d, depth_o3d, depth_scale=1.0, depth_trunc=1.0, convert_rgb_to_intensity=False
+            rgb_o3d, depth_o3d, depth_scale=1.0, depth_trunc=0.7, convert_rgb_to_intensity=False
         )
         
         # Create point cloud from RGBD image
         pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, cam_intrinsics)
         
-        # Apply color thresholding to filter vase (red color)
-        rgb_points = np.asarray(pcd.colors)
-        red_threshold = (rgb_points[:, 0] > 0.5) & (rgb_points[:, 1] < 0.4) & (rgb_points[:, 2] < 0.4)
-        pcd = pcd.select_by_index(np.where(red_threshold)[0])
+        # ==================== MODIFIED SECTION ====================
+        # We need to filter out the robot's own gripper, which is very close to the camera.
+        # We will add a *minimum depth* filter.
+        # Points in 'pcd' are in the camera frame, so pcd.points[:, 2] is the depth.
+        
+        # 1. Get points and colors from the unfiltered cloud
+        points_cam_frame = np.asarray(pcd.points)
+        colors = np.asarray(pcd.colors)
 
+        # 2. Create the color threshold mask (your original logic)
+        color_mask = (colors[:, 0] > 0.5) & (colors[:, 1] < 0.4) & (colors[:, 2] < 0.4)
+
+        # 3. Create a minimum depth threshold mask (filter out gripper)
+        # We filter any point closer than 10cm (0.1 meters)
+        MIN_DEPTH = 0.1 
+        depth_mask = (points_cam_frame[:, 2] > MIN_DEPTH)
+        
+        # 4. Combine the masks
+        # We want points that are BOTH red AND far enough away
+        combined_mask = color_mask & depth_mask
+        
+        # 5. Apply the combined mask to the point cloud
+        pcd = pcd.select_by_index(np.where(combined_mask)[0])
+        # ================== END MODIFIED SECTION ==================
         # Get end-effector pose in world frame
         eef_pos = self.robot_pos
         eef_quat = self.robot_quat  # [qw, qx, qy, qz]
@@ -328,21 +347,43 @@ class Experiment:
         # TODO: Pose estimation and grasping
         # Define target poses for capturing multiple views
         # These poses are chosen to环绕花瓶, covering different angles and heights
+        # This quaternion points the gripper/camera down
+        down_orientation = [0.0, 0.7071, 0.7071, 0.0] 
+        
+        vase_init_pos_tuple = self.scene.cfg.vase.init_state.pos
+            
+            # 将元组 (tuple) 转换为 numpy 数组
+            # Convert the tuple to a numpy array
+        vase_position = np.array(vase_init_pos_tuple)
+        # Base position (center)
+        base_x = vase_position[0]
+        base_y = vase_position[1]
+        base_z = 0.5 # 保持之前设定的 0.5米 高度
+        
+        # Offset for side views
+        offset = 0.1 # 10 cm offset
+
         target_poses = [
-            # Pose 1: Front view, further back
+            # Pose 1: Top-down (Center)
             # [x, y, z, qw, qx, qy, qz]
-            [0.65, 0.0, 0.35, 0.7071, 0, 0.7071, 0],
-            # Pose 2: Right-side view
-            [0.45, -0.2, 0.35, 0.5, 0.5, 0.5, 0.5],
-            # Pose 3: Left-side view
-            [0.45, 0.2, 0.35, 0.5, -0.5, 0.5, -0.5],
-            # Pose 4: High 45-degree angle view
-            [0.6, -0.15, 0.45, 0.653, 0.271, 0.653, -0.271],
-             # Pose 5: Top-down view
-            [0.45, 0.0, 0.5, 0.0, 0.7071, 0.7071, 0.0]
+            [base_x, base_y, base_z, *down_orientation],
+            
+            # Pose 2: Front (move in +X)
+            [base_x + offset, base_y, base_z, *down_orientation],
+            
+            # Pose 3: Back (move in -X)
+            [base_x - offset, base_y, base_z, *down_orientation],
+            
+            # Pose 4: Right (move in -Y)
+            [base_x, base_y - offset, base_z, *down_orientation],
+            
+            # Pose 5: Left (move in +Y)
+            [base_x, base_y + offset, base_z, *down_orientation]
         ]
         
-        view_names = ["front", "right", "left", "angle_high", "top_down"]
+        # Updated view names to match
+        view_names = ["top_down_center", "top_down_front", "top_down_back", "top_down_right", "top_down_left"]
+        # ================== END MODIFIED SECTION ==================
 
         # Capture point clouds from each view
         for i, (target_pose, view_name) in enumerate(zip(target_poses, view_names)):
