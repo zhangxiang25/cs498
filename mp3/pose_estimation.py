@@ -27,6 +27,8 @@ from isaaclab.scene import InteractiveScene
 
 from task_envs import MP3PoseEstimSceneCfg, PHYSICS_DT, RENDERING_DT
 
+import open3d as o3d
+
 
 # wrap everything into a class so it is easier to access things
 class Experiment:
@@ -74,6 +76,8 @@ class Experiment:
         self.robot_pose = self.scene["ur5e"].data.body_state_w[0, self.scene["ur5e"].find_bodies(self.ik_body)[0][0], :7].detach().cpu().numpy()
         self.robot_pos = self.robot_pose[:3]
         self.robot_quat = self.robot_pose[3:]
+
+        self.world_point_clouds = []
 
 
     def move_robot_joint (self, target_joint_pos, target_gripper_pos, count = 10, time_for_residual_movement = 5):
@@ -218,15 +222,157 @@ class Experiment:
         self.robot_pos = self.robot_pose[:3]
         self.robot_quat = self.robot_pose[3:]
 
+    def capture_and_process_frame(self, cam_intrinsics, T_eef_cam, save_visualization=False, view_name=""):
+        """Capture RGB-D frame, process to point cloud, and transform to world coordinates"""
+        # Get camera data
+        wrist_camera = self.scene.sensors["wrist_camera"]
+        rgb = wrist_camera.data.output["rgb"][0].cpu().numpy()
+        depth = wrist_camera.data.output["depth"][0].cpu().numpy()
 
+        # Convert to Open3D format
+        rgb_o3d = o3d.geometry.Image(rgb)
+        depth_o3d = o3d.geometry.Image(depth)
+
+        # Create RGBD image and point cloud
+        rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            rgb_o3d, depth_o3d, depth_scale=1.0, depth_trunc=1.0, convert_rgb_to_intensity=False
+        )
+        
+        # Create point cloud from RGBD image
+        pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, cam_intrinsics)
+        
+        # Apply color thresholding to filter vase (red color)
+        rgb_points = np.asarray(pcd.colors)
+        red_threshold = (rgb_points[:, 0] > 0.5) & (rgb_points[:, 1] < 0.4) & (rgb_points[:, 2] < 0.4)
+        pcd = pcd.select_by_index(np.where(red_threshold)[0])
+
+        # Get end-effector pose in world frame
+        eef_pos = self.robot_pos
+        eef_quat = self.robot_quat  # [qw, qx, qy, qz]
+        
+        # Create transformation matrix from end-effector to world
+        T_world_eef = np.eye(4)
+        T_world_eef[:3, :3] = R.from_quat([eef_quat[1], eef_quat[2], eef_quat[3], eef_quat[0]]).as_matrix()
+        T_world_eef[:3, 3] = eef_pos
+
+        # Transform point cloud to world coordinates: T_world_cam = T_world_eef * T_eef_cam
+        T_world_cam = T_world_eef @ T_eef_cam
+        pcd.transform(T_world_cam)
+
+        # Save visualization if requested
+        if save_visualization and view_name:
+            # Save RGB and depth images
+            plt.figure(figsize=(10, 5))
+            plt.subplot(121)
+            plt.imshow(rgb)
+            plt.title(f'RGB Image - {view_name}')
+            plt.subplot(122)
+            plt.imshow(depth, cmap='gray')
+            plt.title(f'Depth Image - {view_name}')
+            plt.savefig(f'vase_{view_name}_rgbd.png')
+            plt.close()
+
+            # Save point cloud visualization
+            o3d.visualization.draw_geometries([pcd], window_name=f'Vase Point Cloud - {view_name}')
+            o3d.io.write_point_cloud(f'vase_{view_name}_pcd.ply', pcd)
+
+        return pcd
+
+    
     def run (self):
         '''
         Your code goes here.
         '''
+        # ==============================================================================
+        # Q3 - 物体点云重建 (Object Point Cloud Reconstruction)
+        # ==============================================================================
+        # 中文注释：
+        # 这个部分的目标是使用机器人手腕上的相机，从多个视角拍摄花瓶的RGB-D图像，
+        # 然后将这些图像转换成点云，并最终融合成一个完整的花瓶三维模型。
 
+        # 步骤 1: 定义相机内参和加载手眼标定矩阵
+        # ------------------------------------------------
+        # Step 1: Define camera intrinsics and load the hand-eye calibration matrix
+        print("开始点云重建...")
+        print("Starting point cloud reconstruction...")
+
+        # 从 task_envs.py 中获取相机参数
+        # Get camera parameters from task_envs.py
+        cam_cfg = self.scene.sensors["wrist_camera"].cfg
+        height, width = cam_cfg.height, cam_cfg.width
+        focal_length, h_aperture = cam_cfg.spawn.focal_length, cam_cfg.spawn.horizontal_aperture
+        
+        # 计算以像素为单位的焦距和主点
+        # Calculate focal length in pixels and the principal point
+        fx = (focal_length / h_aperture) * width
+        fy = fx  # 假设像素是正方形 Assuming square pixels
+        cx, cy = width / 2, height / 2
+        cam_intrinsics = o3d.camera.PinholeCameraIntrinsic(width, height, fx, fy, cx, cy)
+        print(f"相机内参 (fx, fy, cx, cy): ({fx:.2f}, {fy:.2f}, {cx:.2f}, {cy:.2f})")
+
+        # 从你的 .npz 文件加载手眼标定矩阵 T_eef_cam
+        # Load hand-eye calibration matrix T_eef_cam from your .npz file
+        try:
+            with np.load('hand_eye_calibration_result.npz') as data:
+                # 假设矩阵在文件中的键是 'T_eef_cam'
+                # Assuming the key for the matrix in the file is 'T_eef_cam'
+                T_eef_cam = data['T_eef_cam']
+            print("成功加载手眼标定矩阵 'hand_eye_calibration_result.npz'.")
+            print("Successfully loaded hand-eye calibration matrix from 'hand_eye_calibration_result.npz'.")
+        except (FileNotFoundError, KeyError) as e:
+            print(f"错误: 加载手眼标定文件失败。 {e}")
+            print(f"ERROR: Failed to load hand-eye calibration file. {e}")
+            simulation_app.close()
+            return
 
         # TODO: Pose estimation and grasping
+        # Define target poses for capturing multiple views
+        # These poses are chosen to环绕花瓶, covering different angles and heights
+        target_poses = [
+            # Pose 1: Front view, further back
+            # [x, y, z, qw, qx, qy, qz]
+            [0.65, 0.0, 0.35, 0.7071, 0, 0.7071, 0],
+            # Pose 2: Right-side view
+            [0.45, -0.2, 0.35, 0.5, 0.5, 0.5, 0.5],
+            # Pose 3: Left-side view
+            [0.45, 0.2, 0.35, 0.5, -0.5, 0.5, -0.5],
+            # Pose 4: High 45-degree angle view
+            [0.6, -0.15, 0.45, 0.653, 0.271, 0.653, -0.271],
+             # Pose 5: Top-down view
+            [0.45, 0.0, 0.5, 0.0, 0.7071, 0.7071, 0.0]
+        ]
+        
+        view_names = ["front", "right", "left", "angle_high", "top_down"]
 
+        # Capture point clouds from each view
+        for i, (target_pose, view_name) in enumerate(zip(target_poses, view_names)):
+            print(f"\nCapturing view {i+1}/{len(target_poses)}: {view_name}")
+            
+            # Move robot to target pose
+            self.move_robot_ik(target_pose)
+            self.sim_wait(20)  # Settle before capturing
+            
+            # Capture and process frame
+            pcd = self.capture_and_process_frame(cam_intrinsics, T_eef_cam, save_visualization=True, view_name=view_name)
+            self.world_point_clouds.append(pcd)
+
+        # Combine all point clouds
+        combined_pcd = o3d.geometry.PointCloud()
+        for pcd in self.world_point_clouds:
+            combined_pcd += pcd
+
+        # Downsample to reduce noise and redundancy
+        combined_pcd = combined_pcd.voxel_down_sample(voxel_size=0.002)
+        
+        # Remove outliers
+        cl, ind = combined_pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
+        combined_pcd = combined_pcd.select_by_index(ind)
+
+        # Save and visualize combined point cloud
+        o3d.io.write_point_cloud('combined_vase_pcd.ply', combined_pcd)
+        print("\n显示合并后的点云...")
+        print("Displaying combined point cloud...")
+        o3d.visualization.draw_geometries([combined_pcd], window_name='Combined Vase Point Cloud')
 
         # steps simulation but does not command the robot
         while simulation_app.is_running():
