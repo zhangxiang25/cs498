@@ -30,7 +30,7 @@ def compute_relative_motions(eef_poses: np.ndarray, tag_poses: np.ndarray) -> tu
         T_cam_tag1 = tag_poses[i]
         T_cam_tag2 = tag_poses[i + 1]
         # calculates the change in the tag's pose as seen by the camera
-        T_tag1_tag2 = T_cam_tag1 @ np.linalg.inv(T_cam_tag2) 
+        T_tag1_tag2 = T_cam_tag2 @ np.linalg.inv(T_cam_tag1) 
         R_target2cam.append(T_tag1_tag2[:3, :3])
         t_target2cam.append(T_tag1_tag2[:3, 3].reshape(3, 1))  
 

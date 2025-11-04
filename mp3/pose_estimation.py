@@ -205,14 +205,32 @@ class Experiment:
                 
                 return
             
-
-    def sim_wait (self, count):
+# added gripper_target
+    def sim_wait (self, count,gripper_target=None):
         '''
         Wait for a given number of timesteps in simulation.
         '''
 
         print("Waiting...")
+        robot_articulation = self.scene.articulations["ur5e"]
+        full_joint_target = robot_articulation.data.joint_pos.squeeze().clone()
+        
+        if gripper_target is not None and torch.is_tensor(gripper_target):
+            # The UR5e arm has 6 joints. Gripper joints are usually the 7th and 8th (index 6 and 7).
+            # Get the total number of joints (e.g., 8: 6 arm + 2 gripper)
+            num_total_joints = full_joint_target.shape[0]
+            
+            # The index of the first gripper joint is num_total_joints - 2
+            # Assuming a 6-DoF arm + a 2-DoF gripper (like Robotiq 2F-85)
+            gripper_joint_ids_start = num_total_joints - 2
+            
+            # Update the gripper part of the full_joint_target tensor
+            # gripper_target is expected to be a [2] tensor: [open_val, open_val]
+            full_joint_target[gripper_joint_ids_start:num_total_joints] = gripper_target
         for _ in range (count):
+            if gripper_target is not None and torch.is_tensor(gripper_target):
+                # Continuously set the joint target to hold the open position
+                robot_articulation.set_joint_position_target(full_joint_target)
             self.scene.write_data_to_sim()
             self.sim.step()
             self.scene.update(self.sim_dt)
@@ -237,22 +255,26 @@ class Experiment:
 
         # Create RGBD image
         rgbd_image = o3d.geometry.RGBDImage.create_from_color_and_depth(
-            rgb_o3d, depth_o3d, depth_scale=1.0, depth_trunc=0.7, convert_rgb_to_intensity=False
+            rgb_o3d, depth_o3d, depth_scale=1.0, depth_trunc=1.0, convert_rgb_to_intensity=False
         )
         
         # Create point cloud from RGBD image
         pcd = o3d.geometry.PointCloud.create_from_rgbd_image(rgbd_image, cam_intrinsics)
         
-        # Filter points (your logic from previous step)
+        # # Filter points (your logic from previous step)
         points_cam_frame = np.asarray(pcd.points)
         colors = np.asarray(pcd.colors)
         color_mask = (colors[:, 0] > 0.5) & (colors[:, 1] < 0.4) & (colors[:, 2] < 0.4)
         MIN_DEPTH = 0.1 
-        depth_mask = (points_cam_frame[:, 2] > MIN_DEPTH)
+        MAX_DEPTH = 1.0 # Match depth_trunc limit (1.0 m)
+        depth_mask = (points_cam_frame[:, 2] > MIN_DEPTH) & (points_cam_frame[:, 2] < MAX_DEPTH)
         combined_mask = color_mask & depth_mask
         pcd = pcd.select_by_index(np.where(combined_mask)[0])
 
-        # ==================== MODIFIED SECTION ====================
+        if len(pcd.points) == 0:
+            print(f"[WARNING] Point cloud is empty after depth filtering for view: {view_name}. Check the MIN/MAX_DEPTH values.")
+            return o3d.geometry.PointCloud()
+       
         # Get end-effector pose in world frame from arguments
         eef_pos = current_eef_pos.cpu().numpy()      # Use argument, convert to numpy
         eef_quat_wxyz = current_eef_quat.cpu().numpy() # Use argument, convert to numpy
@@ -260,16 +282,22 @@ class Experiment:
         # Create transformation matrix from end-effector to world
         T_world_eef = np.eye(4)
         
-        # Convert quaternion [w, x, y, z] to [x, y, z, w] for scipy
-        eef_quat_xyzw = [eef_quat_wxyz[1], eef_quat_wxyz[2], eef_quat_wxyz[3], eef_quat_wxyz[0]]
+        q_w, q_x, q_y, q_z = eef_quat_wxyz
+        
+        # ================== START MODIFIED SECTION ==================
+        eef_quat_xyzw = [q_x, q_y, q_z, q_w] # Just re-order, NO negation
         T_world_eef[:3, :3] = R.from_quat(eef_quat_xyzw).as_matrix()
-        T_world_eef[:3, 3] = eef_pos
+        #
         # ================== END MODIFIED SECTION ==================
+        
+        T_world_eef[:3, 3] = eef_pos
+
 
         # Transform point cloud to world coordinates: T_world_cam = T_world_eef * T_eef_cam
         T_world_cam = T_world_eef @ T_eef_cam
         pcd.transform(T_world_cam)
 
+        self.world_point_clouds.append(pcd)
         # Save visualization if requested
         if save_visualization and view_name:
             # ... (saving logic remains the same) ...
@@ -282,7 +310,9 @@ class Experiment:
             plt.title(f'Depth Image - {view_name}')
             plt.savefig(f'vase_{view_name}_rgbd.png')
             plt.close()
-            o3d.visualization.draw_geometries([pcd], window_name=f'Vase Point Cloud - {view_name}')
+            # Note: o3d.visualization.draw_geometries blocks execution, 
+            # so you might want to comment this out inside the loop
+            # o3d.visualization.draw_geometries([pcd], window_name=f'Vase Point Cloud - {view_name}')
             o3d.io.write_point_cloud(f'vase_{view_name}_pcd.ply', pcd)
 
         return pcd
@@ -327,6 +357,7 @@ class Experiment:
                 # Assuming the key for the matrix in the file is 'T_eef_cam'
                 T_eef_cam = data['T_eef_cam']
             print("成功加载手眼标定矩阵 'hand_eye_calibration_result.npz'.")
+            print(f"T_eef_cam (translation): {T_eef_cam}")
             print("Successfully loaded hand-eye calibration matrix from 'hand_eye_calibration_result.npz'.")
         except (FileNotFoundError, KeyError) as e:
             print(f"错误: 加载手眼标定文件失败。 {e}")
@@ -346,6 +377,23 @@ class Experiment:
             simulation_app.close()
             return
         # TODO: Pose estimation and grasping
+        # --- START MODIFICATION FOR GRIPPER ---
+        # 1. Define the gripper open target (e.g., 0.08m)
+        GRIPPER_OPEN_POS = 0.05 
+        # Convert to tensor for use with joint control functions
+        gripper_open_target = torch.tensor([GRIPPER_OPEN_POS, GRIPPER_OPEN_POS], device=self.sim.device)
+        
+        # 2. Open the gripper using the existing joint control function
+        # Move arm joints to current position (i.e., don't move), move gripper to open position
+        print("\nOpening gripper to a fixed position...")
+        current_arm_joints = self.scene["ur5e"].data.joint_pos[:, :6].squeeze().detach().cpu().numpy()
+        self.move_robot_joint(
+            target_joint_pos=current_arm_joints, 
+            target_gripper_pos=GRIPPER_OPEN_POS, 
+            count=100, # More steps for a smoother movement
+            time_for_residual_movement=50
+        )
+        # --- END MODIFICATION FOR GRIPPER ---
         # Define target poses for capturing multiple views
         # These poses are chosen to环绕花瓶, covering different angles and heights
         # This quaternion points the gripper/camera down
@@ -359,40 +407,80 @@ class Experiment:
         # Base position (center)
         base_x = vase_position[0]
         base_y = vase_position[1]
-        base_z = 0.5 # 保持之前设定的 0.5米 高度
+        base_z = 0.4 # 保持之前设定的 0.5米 高度
         
         # Offset for side views
         offset = 0.1 # 10 cm offset
 
+        NEW_OFFSET = 0.05 # New, larger offset (25cm)
+        NEW_HEIGHT = 0.35 # New, lower height (35cm)
+        # Keep the top-down orientation for simplicity, but adjust the base_z for the offset views.
+
+        # --- UPDATED TARGET POSES LIST ---
         target_poses = [
-            # Pose 1: Top-down (Center)
-            # [x, y, z, qw, qx, qy, qz]
-            [base_x, base_y, base_z, *down_orientation],
+            # Pose 1: Top-down (Center) - Keep original
+            [base_x, base_y, base_z, *down_orientation], 
             
-            # Pose 2: Front (move in +X)
-            [base_x + offset, base_y, base_z, *down_orientation],
+            # Pose 2: Front (+X offset, Lower, Further)
+            [base_x + NEW_OFFSET, base_y, NEW_HEIGHT, *down_orientation],
             
-            # Pose 3: Back (move in -X)
-            [base_x - offset, base_y, base_z, *down_orientation],
+            # Pose 3: Back (-X offset, Lower, Further)
+            [base_x - NEW_OFFSET, base_y, NEW_HEIGHT, *down_orientation],
             
-            # Pose 4: Right (move in -Y)
-            [base_x, base_y - offset, base_z, *down_orientation],
+            # Pose 4: Right (-Y offset, Lower, Further)
+            [base_x, base_y - NEW_OFFSET, NEW_HEIGHT, *down_orientation],
             
-            # Pose 5: Left (move in +Y)
-            [base_x, base_y + offset, base_z, *down_orientation]
+            # Pose 5: Left (+Y offset, Lower, Further)
+            [base_x, base_y + NEW_OFFSET, NEW_HEIGHT, *down_orientation]
         ]
         
         # Updated view names to match
         view_names = ["top_down_center", "top_down_front", "top_down_back", "top_down_right", "top_down_left"]
         # ================== END MODIFIED SECTION ==================
 
+        # ================== START NEW POSES SECTION ==================
+        # 之前的姿态都是朝下的, 会漏掉花瓶的底部。
+        # 我们添加2个新的姿态：更低、更远, 并且带角度朝内看。
+        # The previous poses are all top-down, which misses the lower part.
+        # We will add 2 new poses that are lower, further away, and angled inwards.
+        
+        LOW_OFFSET = 0.4  # 更远 (30cm) 以获得更好的角度
+        LOW_HEIGHT = 0.15 # 更低 (z=0.30m), (Raised from 0.25 to 0.30 to avoid collision)
+
+        # 新的朝内并略微朝上的姿态 [w, x, y, z]
+        # ================== START CORRECTION ==================
+
+        
+        angled_orientation_right = [0.130, -0.130, 0.698, -0.698] # [w, x, y, z]
+
+        angled_orientation_left = [-0.130, 0.130, -0.698, 0.698] # [w, x, y, z]
+        # ================== END CORRECTION ==================
+
+
+        # Add new poses to the list
+        target_poses.extend([
+            
+            # Pose 9: Low, Left
+            [base_x, base_y + LOW_OFFSET, LOW_HEIGHT, *angled_orientation_left],
+            # Pose 1: Top-down (Center) - Keep original
+            #[base_x, base_y, base_z, *down_orientation],
+            # Pose 8: Low, Right
+            #[base_x, base_y - LOW_OFFSET, LOW_HEIGHT, *angled_orientation_right],
+        ])
+        
+        view_names.extend([
+            "low_angled_left",
+            #"top_down"
+            #"low_angled_right"
+        ])
+        # ================== END NEW POSES SECTION ==================
         # Capture point clouds from each view
         for i, (target_pose, view_name) in enumerate(zip(target_poses, view_names)):
             print(f"\nCapturing view {i+1}/{len(target_poses)}: {view_name}")
             
             # Move robot to target pose
             self.move_robot_ik(target_pose)
-            self.sim_wait(20)  # Settle before capturing
+            self.sim_wait(20,gripper_target=gripper_open_target)  # Settle before capturing
             # === MODIFIED: Manually get the CURRENT robot pose ===
             # We must get the pose *after* sim_wait, as this is when the robot has arrived
             # The .data attribute is updated by scene.update() (which sim_wait calls)
