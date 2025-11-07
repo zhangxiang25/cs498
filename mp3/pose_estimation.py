@@ -284,11 +284,8 @@ class Experiment:
         
         q_w, q_x, q_y, q_z = eef_quat_wxyz
         
-        # ================== START MODIFIED SECTION ==================
         eef_quat_xyzw = [q_x, q_y, q_z, q_w] # Just re-order, NO negation
         T_world_eef[:3, :3] = R.from_quat(eef_quat_xyzw).as_matrix()
-        #
-        # ================== END MODIFIED SECTION ==================
         
         T_world_eef[:3, 3] = eef_pos
 
@@ -377,7 +374,6 @@ class Experiment:
             simulation_app.close()
             return
         # TODO: Pose estimation and grasping
-        # --- START MODIFICATION FOR GRIPPER ---
         # 1. Define the gripper open target (e.g., 0.08m)
         GRIPPER_OPEN_POS = 0.05 
         # Convert to tensor for use with joint control functions
@@ -393,7 +389,6 @@ class Experiment:
             count=100, # More steps for a smoother movement
             time_for_residual_movement=50
         )
-        # --- END MODIFICATION FOR GRIPPER ---
         # Define target poses for capturing multiple views
         # These poses are chosen to环绕花瓶, covering different angles and heights
         # This quaternion points the gripper/camera down
@@ -416,7 +411,6 @@ class Experiment:
         NEW_HEIGHT = 0.35 # New, lower height (35cm)
         # Keep the top-down orientation for simplicity, but adjust the base_z for the offset views.
 
-        # --- UPDATED TARGET POSES LIST ---
         target_poses = [
             # Pose 1: Top-down (Center) - Keep original
             [base_x, base_y, base_z, *down_orientation], 
@@ -470,13 +464,12 @@ class Experiment:
             # Move robot to target pose
             self.move_robot_ik(target_pose)
             self.sim_wait(20,gripper_target=gripper_open_target)  # Settle before capturing
-            # === MODIFIED: Manually get the CURRENT robot pose ===
+
             # We must get the pose *after* sim_wait, as this is when the robot has arrived
             # The .data attribute is updated by scene.update() (which sim_wait calls)
             robot_data = robot_articulation.data
             current_eef_pos = robot_data.body_pos_w[0, eef_index]   # Get pos from tensor
             current_eef_quat = robot_data.body_quat_w[0, eef_index] # Get quat from tensor [w, x, y, z]
-            # === END MODIFIED ===
             # Capture and process frame
             pcd = self.capture_and_process_frame(
                 cam_intrinsics, T_eef_cam, 
@@ -500,6 +493,118 @@ class Experiment:
         print("\n显示合并后的点云...")
         print("Displaying combined point cloud...")
         o3d.visualization.draw_geometries([combined_pcd], window_name='Combined Vase Point Cloud')
+
+        # Q4 - 迭代最近点 (Iterative Closest Point)
+        # ==============================================================================
+        print("\n开始 Q4 ICP 配准...")
+        print("Starting Q4 ICP Registration...")
+
+        # ------------------------------------------------
+        # 步骤 1: 加载源点云 (模型)
+        # ------------------------------------------------
+        try:
+            # 假设 vase.npz 文件在同一个目录下
+            source_data = np.load('objects/vase.npz') 
+            # 假设 .npz 文件中的键是 'points'
+            source_key = source_data.files[0]
+            source_points = source_data[source_key] 
+            source_pcd = o3d.geometry.PointCloud()
+            source_pcd.points = o3d.utility.Vector3dVector(source_points)
+            print("成功加载源点云 'vase.npz'.")
+            print("Successfully loaded source point cloud 'vase.npz'.")
+        except (FileNotFoundError, KeyError) as e:
+            print(f"错误: 加载 'vase.npz' 失败. 请确保文件存在并且键是 'points'. {e}")
+            print(f"ERROR: Failed to load 'vase.npz'. Ensure file exists and key is 'points'. {e}")
+            simulation_app.close()
+            return
+        
+        # ------------------------------------------------
+        # 步骤 2: 准备 ICP - 初始猜测 (Pre-alignment)
+        # ------------------------------------------------
+        # ICP 需要一个好的初始猜测。我们使用仿真中花瓶的*初始*位置作为猜测。
+        # 'vase_position' 已经在 Q3 的开头部分从 self.scene.cfg.vase.init_state.pos 中获取了
+        
+        # 创建一个初始变换矩阵 (仅平移，无旋转)
+        # 这是 T_world_model_initial
+        initial_transform = np.eye(4)
+        initial_transform[:3, 3] = vase_position 
+        
+        # 创建一个源点云的副本用于可视化 "Before"
+        source_pcd_aligned_guess = o3d.geometry.PointCloud(source_pcd)
+        source_pcd_aligned_guess.transform(initial_transform)
+
+        # ------------------------------------------------
+        # 步骤 3: 可视化 "Before"
+        # ------------------------------------------------
+        # 给点云上色以便区分
+        source_pcd_aligned_guess.paint_uniform_color([1, 0, 0]) # 源点云 = 红色
+        combined_pcd.paint_uniform_color([0, 0, 1])               # 目标点云 = 蓝色
+
+        print("显示 ICP 配准 *之前* 的点云 (红色=源, 蓝色=目标)...")
+        print("Displaying point clouds *before* ICP registration (Red=Source, Blue=Target)...")
+        o3d.visualization.draw_geometries(
+            [source_pcd_aligned_guess, combined_pcd], 
+            window_name='[Q4] Before ICP (Red=Source, Blue=Target)'
+        )
+
+        # ------------------------------------------------
+        # 步骤 4: 执行 ICP
+        # ------------------------------------------------
+        # (为你报告准备的) ICP 工作原理:
+        # 1. 寻找对应点：对于源点云中的每个点，在目标点云中找到*最近*的邻居点。
+        # 2. 最小化误差：计算一个刚体变换（旋转+平移），该变换能使这些对应点对之间的
+        #    距离（通常是平方和）最小化。
+        # 3. 应用变换：将计算出的变换应用于*源*点云。
+        # 4. 迭代：重复步骤 1-3，直到变换收敛（变化很小）或达到最大迭代次数。
+
+        threshold = 0.02  # 2cm - 对应点对之间的最大距离
+        criteria = o3d.pipelines.registration.ICPConvergenceCriteria(max_iteration=2000)
+
+        print("正在运行 ICP...")
+        print("Running ICP...")
+        
+        # 我们提供了*原始*的 source_pcd (在原点) 和 initial_transform (我们的猜测)
+        # ICP 算法将使用 initial_transform 作为起点
+        icp_result = o3d.pipelines.registration.registration_icp(
+            source_pcd,        # 原始源点云 (在原点)
+            combined_pcd,        # 目标点云 (在世界坐标系)
+            threshold,         # 最大对应距离
+            initial_transform, # 我们的初始猜测
+            o3d.pipelines.registration.TransformationEstimationPointToPoint(),
+            criteria
+        )
+        
+        # 最终的变换矩阵 (T_world_vase)
+        final_transform = icp_result.transformation
+        print("ICP 完成.")
+        print("ICP finished.")
+        print("ICP 最终变换矩阵 (T_world_vase):")
+        print(final_transform)
+        print(f"ICP Fitness: {icp_result.fitness:.4f}, RMSE: {icp_result.inlier_rmse:.4f}")
+
+        # ------------------------------------------------
+        # 步骤 5: 可视化 "After"
+        # ------------------------------------------------
+        # 创建一个新的源点云副本并应用*最终*的变换
+        source_pcd_final = o3d.geometry.PointCloud(source_pcd)
+        source_pcd_final.transform(final_transform)
+        source_pcd_final.paint_uniform_color([1, 0, 0]) # 源点云 = 红色
+        # target_pcd 仍然是蓝色
+
+        print("显示 ICP 配准 *之后* 的点云 (红色=源, 蓝色=目标)...")
+        print("Displaying point clouds *after* ICP registration (Red=Source, Blue=Target)...")
+        o3d.visualization.draw_geometries(
+            [source_pcd_final, combined_pcd], 
+            window_name='[Q4] After ICP (Red=Source, Blue=Target)'
+        )
+
+        # ------------------------------------------------
+        # 步骤 6: 保存结果供 Q5 使用
+        # ------------------------------------------------
+        # 这个 final_transform 就是 Q5 需要的 T_world_vase (或 T_world_model)
+        np.savez('icp_result.npz', T_world_vase=final_transform, icp_fitness=icp_result.fitness)
+        print("ICP 结果 (T_world_vase) 已保存到 'icp_result.npz' 供 Q5 使用.")
+        print("ICP result (T_world_vase) saved to 'icp_result.npz' for use in Q5.")
 
         # steps simulation but does not command the robot
         while simulation_app.is_running():
