@@ -436,44 +436,33 @@ class Experiment:
         
         # Updated view names to match
         view_names = ["top_down_center", "top_down_front", "top_down_back", "top_down_right", "top_down_left"]
-        # ================== END MODIFIED SECTION ==================
-
-        # ================== START NEW POSES SECTION ==================
-        # 之前的姿态都是朝下的, 会漏掉花瓶的底部。
-        # 我们添加2个新的姿态：更低、更远, 并且带角度朝内看。
-        # The previous poses are all top-down, which misses the lower part.
-        # We will add 2 new poses that are lower, further away, and angled inwards.
+   
         
-        LOW_OFFSET = 0.4  # 更远 (30cm) 以获得更好的角度
-        LOW_HEIGHT = 0.15 # 更低 (z=0.30m), (Raised from 0.25 to 0.30 to avoid collision)
-
-        # 新的朝内并略微朝上的姿态 [w, x, y, z]
-        # ================== START CORRECTION ==================
-
+        LOW_OFFSET = 0.3  # 更远 (30cm) 以获得更好的角度
+        LOW_HEIGHT = 0.2 # 更低 (z=0.30m), (Raised from 0.25 to 0.30 to avoid collision)
         
-        angled_orientation_right = [0.130, -0.130, 0.698, -0.698] # [w, x, y, z]
-
-        angled_orientation_left = [-0.130, 0.130, -0.698, 0.698] # [w, x, y, z]
-        # ================== END CORRECTION ==================
-
+        angled_orientation_right = [-0.5, 0.5, 0.5, 0.5] # [w, x, y, z]
+        
+        # angled_orientation_left = [0.130, -0.130, -0.698, 0.698] # [w, x, y, z]
+        angled_orientation_left = [0.5,0.5,0.5,-0.5] # [w, x, y, z]
 
         # Add new poses to the list
         target_poses.extend([
             
             # Pose 9: Low, Left
-            [base_x, base_y + LOW_OFFSET, LOW_HEIGHT, *angled_orientation_left],
+            [base_x+0.12, base_y + LOW_OFFSET, LOW_HEIGHT, *angled_orientation_left],
             # Pose 1: Top-down (Center) - Keep original
-            #[base_x, base_y, base_z, *down_orientation],
+            [base_x, base_y, base_z, *down_orientation],
             # Pose 8: Low, Right
-            #[base_x, base_y - LOW_OFFSET, LOW_HEIGHT, *angled_orientation_right],
+            [base_x+0.12, base_y - LOW_OFFSET, LOW_HEIGHT, *angled_orientation_right],
         ])
         
         view_names.extend([
             "low_angled_left",
-            #"top_down"
-            #"low_angled_right"
+            "top_down",
+            "low_angled_right"
         ])
-        # ================== END NEW POSES SECTION ==================
+
         # Capture point clouds from each view
         for i, (target_pose, view_name) in enumerate(zip(target_poses, view_names)):
             print(f"\nCapturing view {i+1}/{len(target_poses)}: {view_name}")
