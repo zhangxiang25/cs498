@@ -48,6 +48,31 @@ UR5E_CONFIG = ArticulationCfg(
     },
 )
 
+# This points to the USD file you just created.
+# We assume you created a 'door_usd' folder next to this env.py file.
+DOOR_CONFIG = ArticulationCfg(
+    spawn = sim_utils.UsdFileCfg(
+        # This path finds the 'door_usd' folder in the same directory as this script
+        usd_path = "{}/door_usd/door.usd".format(os.path.dirname(os.path.abspath(__file__))),
+        activate_contact_sensors = True,
+        
+    ),
+    init_state = ArticulationCfg.InitialStateCfg(
+        joint_pos = {
+            "hinge_joint": 0.0  # This MUST match the joint name from the editor
+        },
+    ),
+    actuators = {
+        "door_hinge": ImplicitActuatorCfg(
+            joint_names_expr = ["hinge_joint"], # Must match the joint name
+            effort_limit = 1e2,
+            velocity_limit = 1000.0,
+            stiffness = 100.0, # Lower stiffness so it can be pushed
+            damping = 10.0,
+        ),
+    },
+
+)
 
 @configclass
 class MP2SceneCfg(InteractiveSceneCfg):
@@ -96,119 +121,101 @@ class MP2SceneCfg(InteractiveSceneCfg):
         table_max_y = table_center_pos[1] + table_size[1] / 2.0  # 0.35
 
         # --- Randomization for Door ---
-        door_size = (0.15, 0.1, 0.01) # (length, width, height)
+        # The door asset's built-in height is 0.2, so its center is 0.1 above its base.
+        # We place its base on the table (z=0.21), so the center z is 0.21 + 0.1 = 0.31
+        door_z = table_top_z 
         door_rot_noise = 180.
         
         # Random position on table (avoiding edges)
-        door_x_half_size = door_size[0] / 2.0
-        door_y_half_size = door_size[1] / 2.0
+        door_x_half_size = 0.15 / 2.0 # From the scale we used
+        door_y_half_size = 0.02 / 2.0 # From the scale we used
+        
         door_x = np.random.uniform(table_min_x + door_x_half_size, 
                                  table_max_x - door_x_half_size)
         door_y = np.random.uniform(table_min_y + door_y_half_size, 
                                  table_max_y - door_y_half_size)
-        door_z = table_top_z + door_size[2] / 2.0 # Center of door, placed on table top
         
         # Random rotation (yaw only)
         door_rot_euler = np.array([0.0, 0.0, 0.0])
         door_rot_euler[2] += (np.random.random() - 0.5) * 2. * door_rot_noise
         door_rot_quat = R.from_euler("xyz", door_rot_euler, degrees=True).as_quat()
 
-        # --- Randomization for Cubes (Original Logic) ---
-        # randomize cube poses
-        center_x = 0.5
-        center_y = 0.0
-        cube_pos_noise = 0.05
-        red_cube_x = center_x + (np.random.random() - 0.5)*2 * cube_pos_noise
-        red_cube_y = center_y + (np.random.random() - 0.5)*2 * cube_pos_noise
-        green_cube_1_angle = np.random.random() * 2*np.pi
-        green_cube_dist = 0.055
-        cube_rot_noise = 180.
+        
+        # Cube properties
+        red_cube_size = 0.04
+        green_cube_size = 0.05
+        # Correct Z-position: table_top_z (0.21) + half_height
+        red_cube_z = table_top_z + (red_cube_size / 2.0)     # 0.23
+        green_cube_z = table_top_z + (green_cube_size / 2.0)   # 0.235
+        cube_rot_noise = 180
 
-        # red cube
-        cube_rot_euler = np.array([0.0, 0.0, 0.0])
-        cube_rot_euler[2] += (np.random.random() - 0.5) * 2. * cube_rot_noise
-        cube_rot_quat = R.from_euler("xyz", cube_rot_euler, degrees=True).as_quat()
-        self.cubeA = AssetBaseCfg(
-            prim_path = '/World/cubeA',
-            spawn = sim_utils.MeshCuboidCfg(
-                size = (0.04, 0.04, 0.04),
-                rigid_props = sim_utils.RigidBodyPropertiesCfg(),
-                mass_props = sim_utils.MassPropertiesCfg(mass = 0.5),
-                collision_props = sim_utils.CollisionPropertiesCfg(),
-                visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color = (1.0, 0.0, 0.0)),
-            ),
-            init_state = AssetBaseCfg.InitialStateCfg(
-                pos = (red_cube_x, red_cube_y, 0.225),
-                rot = (cube_rot_quat[3], cube_rot_quat[0], cube_rot_quat[1], cube_rot_quat[2]),
+        # --- (NEW) RED CUBES LOOP ---
+        for i in range(10):
+            # Random position
+            red_x = np.random.uniform(table_min_x + red_cube_size / 2.0, table_max_x - red_cube_size / 2.0)
+            red_y = np.random.uniform(table_min_y + red_cube_size / 2.0, table_max_y - red_cube_size / 2.0)
+            
+            # Random rotation
+            cube_rot_euler = np.array([0.0, 0.0, 0.0])
+            cube_rot_euler[2] += (np.random.random() - 0.5) * 2. * cube_rot_noise
+            cube_rot_quat = R.from_euler("xyz", cube_rot_euler, degrees=True).as_quat()
+            
+            # Create the cube config
+            cube_cfg = AssetBaseCfg(
+                prim_path = f'/World/red_cube_{i+1}', # Dynamic prim path (e.g., /World/red_cube_1)
+                spawn = sim_utils.MeshCuboidCfg(
+                    size = (red_cube_size, red_cube_size, red_cube_size),
+                    rigid_props = sim_utils.RigidBodyPropertiesCfg(),
+                    mass_props = sim_utils.MassPropertiesCfg(mass = 0.5),
+                    collision_props = sim_utils.CollisionPropertiesCfg(),
+                    visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color = (1.0, 0.0, 0.0)),
+                ),
+                init_state = AssetBaseCfg.InitialStateCfg(
+                    pos = (red_x, red_y, red_cube_z),
+                    rot = (cube_rot_quat[3], cube_rot_quat[0], cube_rot_quat[1], cube_rot_quat[2]),
+                )
             )
-        )
+            # Use setattr to dynamically create self.red_cube_1, self.red_cube_2, etc.
+            setattr(self, f'red_cube_{i+1}', cube_cfg)
 
-        # green cube 1
-        green_cube_1_x = red_cube_x + np.cos(green_cube_1_angle) * green_cube_dist
-        green_cube_1_y = red_cube_y + np.sin(green_cube_1_angle) * green_cube_dist
-        cube_rot_euler = np.array([0.0, 0.0, 0.0])
-        cube_rot_euler[2] += (np.random.random() - 0.5) * 2. * cube_rot_noise
-        cube_rot_quat = R.from_euler("xyz", cube_rot_euler, degrees=True).as_quat()
-        self.cubeB = AssetBaseCfg(
-            prim_path = "/World/cubeB",
-            spawn = sim_utils.MeshCuboidCfg(
-                size = (0.05, 0.05, 0.05),
-                rigid_props = sim_utils.RigidBodyPropertiesCfg(),
-                mass_props = sim_utils.MassPropertiesCfg(mass = 0.5),
-                collision_props = sim_utils.CollisionPropertiesCfg(),
-                visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color = (0.0, 0.5, 0.0)),
-            ),
-            init_state = AssetBaseCfg.InitialStateCfg(
-                pos = (green_cube_1_x, green_cube_1_y, 0.23),
-                rot = (cube_rot_quat[3], cube_rot_quat[0], cube_rot_quat[1], cube_rot_quat[2]),
+        # --- (NEW) GREEN CUBES LOOP ---
+        for i in range(10):
+            # Random position
+            green_x = np.random.uniform(table_min_x + green_cube_size / 2.0, table_max_x - green_cube_size / 2.0)
+            green_y = np.random.uniform(table_min_y + green_cube_size / 2.0, table_max_y - green_cube_size / 2.0)
+            
+            # Random rotation
+            cube_rot_euler = np.array([0.0, 0.0, 0.0])
+            cube_rot_euler[2] += (np.random.random() - 0.5) * 2. * cube_rot_noise
+            cube_rot_quat = R.from_euler("xyz", cube_rot_euler, degrees=True).as_quat()
+            
+            # Create the cube config
+            cube_cfg = AssetBaseCfg(
+                prim_path = f'/World/green_cube_{i+1}', # Dynamic prim path (e.g., /World/green_cube_1)
+                spawn = sim_utils.MeshCuboidCfg(
+                    size = (green_cube_size, green_cube_size, green_cube_size),
+                    rigid_props = sim_utils.RigidBodyPropertiesCfg(),
+                    mass_props = sim_utils.MassPropertiesCfg(mass = 0.5),
+                    collision_props = sim_utils.CollisionPropertiesCfg(),
+                    visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color = (0.0, 0.5, 0.0)),
+                ),
+                init_state = AssetBaseCfg.InitialStateCfg(
+                    pos = (green_x, green_y, green_cube_z),
+                    rot = (cube_rot_quat[3], cube_rot_quat[0], cube_rot_quat[1], cube_rot_quat[2]),
+                )
             )
-        )
+            # Use setattr to dynamically create self.green_cube_1, self.green_cube_2, etc.
+            setattr(self, f'green_cube_{i+1}', cube_cfg)
 
-        # green cube 2
-        min_separation = 90.*np.pi/180.
-        max_separation = 2*np.pi - min_separation
-        separation = np.random.random() * (max_separation - min_separation) + min_separation
-        green_cube_2_angle = green_cube_1_angle + separation
-        green_cube_2_x = red_cube_x + np.cos(green_cube_2_angle) * green_cube_dist
-        green_cube_2_y = red_cube_y + np.sin(green_cube_2_angle) * green_cube_dist
-        cube_rot_euler = np.array([0.0, 0.0, 0.0])
-        cube_rot_euler[2] += (np.random.random() - 0.5) * 2. * cube_rot_noise
-        cube_rot_quat = R.from_euler("xyz", cube_rot_euler, degrees=True).as_quat()
-        self.cubeC = AssetBaseCfg(
-            prim_path = "/World/cubeC",
-            spawn = sim_utils.MeshCuboidCfg(
-                size = (0.05, 0.05, 0.05),
-                rigid_props = sim_utils.RigidBodyPropertiesCfg(),
-                mass_props = sim_utils.MassPropertiesCfg(mass = 0.5),
-                collision_props = sim_utils.CollisionPropertiesCfg(),
-                visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color = (0.0, 0.5, 0.0)),
-            ),
-            init_state = AssetBaseCfg.InitialStateCfg(
-                pos = (green_cube_2_x, green_cube_2_y, 0.23),
-                rot = (cube_rot_quat[3], cube_rot_quat[0], cube_rot_quat[1], cube_rot_quat[2]),
-            )
-        )
 
-        # print(red_cube_x, red_cube_y)
-        # print(green_cube_1_x, green_cube_1_y)
-        # print(green_cube_2_x, green_cube_2_y)
-        # print(np.sqrt((green_cube_1_x - red_cube_x)**2 + (green_cube_1_y - red_cube_y)**2))
-        # print(np.sqrt((green_cube_2_x - red_cube_x)**2 + (green_cube_2_y - red_cube_y)**2))
-
-        # --- ADDED: Door ---
-        self.door = AssetBaseCfg(
+        self.door = DOOR_CONFIG.replace(
             prim_path = '/World/door',
-            spawn = sim_utils.MeshCuboidCfg(
-                size = door_size, # Use the variable from above
-                rigid_props = sim_utils.RigidBodyPropertiesCfg(),
-                mass_props = sim_utils.MassPropertiesCfg(mass = 0.2), # Lighter
-                collision_props = sim_utils.CollisionPropertiesCfg(),
-                visual_material = sim_utils.PreviewSurfaceCfg(diffuse_color = (0.0, 0.0, 1.0)), # Blue
-            ),
-            init_state = AssetBaseCfg.InitialStateCfg(
-                pos = (door_x, door_y, door_z),
-                rot = (door_rot_quat[3], door_rot_quat[0], door_rot_quat[1], door_rot_quat[2]),
+            init_state = ArticulationCfg.InitialStateCfg(
+                pos = (door_x, door_y, door_z), # Use the random pos
+                rot = (door_rot_quat[3], door_rot_quat[0], door_rot_quat[1], door_rot_quat[2]), # Use the random rot
+                joint_pos = { "hinge_joint": 0.0 } # Start closed
             )
+            
         )
 
         # table
@@ -282,3 +289,5 @@ class MP2SceneCfg(InteractiveSceneCfg):
                 rot = (1.0, 0.0, 0.0, 0.0),
             )
         )
+
+        

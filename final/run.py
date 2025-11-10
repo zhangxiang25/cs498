@@ -246,9 +246,24 @@ class Experiment:
 
         # move the robot out of the way for getting information from birdview camera
         self.sim_wait(20)
-        target_robot_pos = self.robot_pos - np.array([0.15, 0.2, 0.0])
-        self.move_robot_ik(np.concatenate([target_robot_pos, self.robot_quat]))
-        self.sim_wait(20)
+        
+        # --- Step 1: Lift the arm vertically ---
+        # Get the robot's starting X and Y position
+        lift_pos = self.robot_pos.copy() 
+        # Set the target Z-height to 0.5 (this lifts the arm)
+        lift_pos[2] = 0.5
+        
+        # Execute the vertical lift
+        self.move_robot_ik(np.concatenate([lift_pos, self.robot_quat]))
+        self.sim_wait(20) # Wait for the lift to complete
+
+        # --- Step 2: Move the arm away ---
+        # Define the final "away" position (already at Z=0.5)
+        away_pos = np.array([-0.2, 0.0, 0.5])
+        
+        # Execute the horizontal move
+        self.move_robot_ik(np.concatenate([away_pos, self.robot_quat]))
+        self.sim_wait(20) # Wait for the move to complete
 
         # render birdview camera image
         color_raw = self.scene["birdview_camera"].data.output["rgb"].detach().cpu().numpy()[0]
@@ -256,22 +271,29 @@ class Experiment:
         
         # TODO: move the robot to make the stack
         # h_ : Hue ranges for detecting red and green in the HSV color space
+        
         h_red_low_1 = 0.00
         h_red_high_1 = 0.04
         h_red_low_2 = 0.96
         h_red_high_2 = 1.00
         h_green_low = 0.23
         h_green_high = 0.44
+
+        # Blue range (approx 210-270 degrees)
+        h_blue_low = 0.58
+        h_blue_high = 0.75
+        # Yellow range (approx 50-70 degrees)
+        h_yellow_low = 0.13
+        h_yellow_high = 0.20
+
         # minimum thresholds for Saturation (S) and Value (V)
         s_min = 0.40
         v_min = 0.20
         # The number of iterations for morphological image processing operations, which are used to clean up noise
         morph_iters = 2
-
         hover_offset = 0.12
         lift_offset = 0.16
         grasp_depth = 0.02
-        
         # Ensures the image is in a standard RGB format
         color = color_raw[:, :, :3] if color_raw.shape[2] == 4 else color_raw
         
@@ -288,6 +310,8 @@ class Experiment:
         red2_raw = (h >= h_red_low_2) & (h <= h_red_high_2) & (s >= s_min) & (v >= v_min)
         red_mask_raw = red1_raw | red2_raw
         green_mask_raw = (h >= h_green_low) & (h <= h_green_high) & (s >= s_min) & (v >= v_min)
+        blue_mask_raw = (h >= h_blue_low) & (h <= h_blue_high) & (s >= s_min) & (v >= v_min)
+        yellow_mask_raw = (h >= h_yellow_low) & (h <= h_yellow_high) & (s >= s_min) & (v >= v_min)
 
         # 3x3 square where all elements are considered neighbors
         struct = generate_binary_structure(2, 2)
@@ -300,15 +324,28 @@ class Experiment:
         green_mask = binary_opening(green_mask_raw, structure=struct, iterations=morph_iters)
         green_mask = binary_fill_holes(green_mask)
         green_mask = binary_closing(green_mask, structure=struct, iterations=max(1, morph_iters // 2))
+
+        blue_mask = binary_opening(blue_mask_raw, structure=struct, iterations=morph_iters)
+        blue_mask = binary_fill_holes(blue_mask)
+        blue_mask = binary_closing(blue_mask, structure=struct, iterations=max(1, morph_iters // 2))
+
+        yellow_mask = binary_opening(yellow_mask_raw, structure=struct, iterations=morph_iters)
+        yellow_mask = binary_fill_holes(yellow_mask)
+        yellow_mask = binary_closing(yellow_mask, structure=struct, iterations=max(1, morph_iters // 2))
         
         # Visualizing the 2D Masks
-        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+        fig, axs = plt.subplots(1, 5, figsize=(25, 5))
         axs[0].imshow(color)
         axs[0].set_title('Original Image')
         axs[1].imshow(red_mask, cmap='gray')
         axs[1].set_title('Red Cube Mask')
         axs[2].imshow(green_mask, cmap='gray')
         axs[2].set_title('Green Cube Mask')
+        axs[3].imshow(blue_mask, cmap='gray')
+        axs[3].set_title('Blue Frame Mask')
+        
+        axs[4].imshow(yellow_mask, cmap='gray')
+        axs[4].set_title('Yellow Panel Mask')
         plt.savefig("color_masks.png") # Save the figure instead
         plt.close()
 
@@ -339,10 +376,14 @@ class Experiment:
         # flatten the 2D masks into 1D arrays
         red_pixels = red_mask.flatten().astype(bool)
         green_pixels = green_mask.flatten().astype(bool)
+        blue_pixels = blue_mask.flatten().astype(bool)    # Added blue
+        yellow_pixels = yellow_mask.flatten().astype(bool)  # Added yellow
        
         point_colors = np.full((points_world.shape[0], 3), [0.6, 0.6, 0.6])
         point_colors[red_pixels] = [1, 0, 0]
         point_colors[green_pixels] = [0, 1, 0]
+        point_colors[blue_pixels] = [0, 0, 1]      # Blue
+        point_colors[yellow_pixels] = [1, 1, 0]    # Yellow
 
         fig = plt.figure()
         scene = fig.add_subplot(projection="3d")
@@ -495,6 +536,7 @@ class Experiment:
 
         # this helps shut down the script correctly
         simulation_app.close()
+        
 
 
 if __name__ == "__main__":
