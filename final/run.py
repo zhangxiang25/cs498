@@ -28,7 +28,7 @@ from isaaclab.scene import InteractiveScene
 # from scipy.spatial.transform import Rotation
 from scipy.ndimage import ( # Needed for advanced image processing
     binary_opening, binary_closing, binary_fill_holes,
-    generate_binary_structure, label
+    generate_binary_structure, label,binary_dilation,
 )
 
 from task_envs import MP2SceneCfg, PHYSICS_DT, RENDERING_DT
@@ -80,6 +80,9 @@ class Experiment:
         self.robot_pose = self.scene['ur5e'].data.body_state_w[0, self.scene['ur5e'].find_bodies(self.ik_body)[0][0], :7].detach().cpu().numpy()
         self.robot_pos = self.robot_pose[:3]
         self.robot_quat = self.robot_pose[3:]
+
+        self.gripper_open_val = 0.0
+        self.gripper_close_val = 0.04 # This is just a guess
 
 
     def move_robot_joint (self, target_joint_pos, target_gripper_pos, count = 10, time_for_residual_movement = 5):
@@ -229,8 +232,27 @@ class Experiment:
         self.im.set_data(cam_img)
         plt.pause(1e-6)
         self.fig.canvas.draw()
-            
     
+    def open_gripper(self):
+        """Commands the gripper to open using joint control."""
+        # Calls your existing function to move ONLY the gripper
+        self.move_robot_joint(
+            target_joint_pos=None,  # Arm doesn't move
+            target_gripper_pos=self.gripper_open_val,
+            count=15, # Use a few steps to make it a smooth open
+            time_for_residual_movement=5
+        )
+        
+    def close_gripper(self):
+        """Commands the gripper to close using joint control."""
+        # Calls your existing function to move ONLY the gripper
+        self.move_robot_joint(
+            target_joint_pos=None,  # Arm doesn't move
+            target_gripper_pos=self.gripper_close_val,
+            count=15, # Use a few steps to make it a smooth close
+            time_for_residual_movement=5
+        )
+
     def run (self):
         '''
         You code goes here.
@@ -247,7 +269,6 @@ class Experiment:
         # move the robot out of the way for getting information from birdview camera
         self.sim_wait(20)
         
-        # --- Step 1: Lift the arm vertically ---
         # Get the robot's starting X and Y position
         lift_pos = self.robot_pos.copy() 
         # Set the target Z-height to 0.5 (this lifts the arm)
@@ -257,7 +278,6 @@ class Experiment:
         self.move_robot_ik(np.concatenate([lift_pos, self.robot_quat]))
         self.sim_wait(20) # Wait for the lift to complete
 
-        # --- Step 2: Move the arm away ---
         # Define the final "away" position (already at Z=0.5)
         away_pos = np.array([-0.2, 0.0, 0.5])
         
@@ -269,7 +289,6 @@ class Experiment:
         color_raw = self.scene["birdview_camera"].data.output["rgb"].detach().cpu().numpy()[0]
         #plt.imshow(color)
         
-        # TODO: move the robot to make the stack
         # h_ : Hue ranges for detecting red and green in the HSV color space
         
         h_red_low_1 = 0.00
@@ -283,8 +302,11 @@ class Experiment:
         h_blue_low = 0.58
         h_blue_high = 0.75
         # Yellow range (approx 50-70 degrees)
-        h_yellow_low = 0.13
-        h_yellow_high = 0.20
+        h_yellow_low = 0.14  # Was 0.13
+        h_yellow_high = 0.18 # Was 0.20
+        
+        h_magenta_low = 0.82
+        h_magenta_high = 0.88
 
         # minimum thresholds for Saturation (S) and Value (V)
         s_min = 0.40
@@ -312,8 +334,8 @@ class Experiment:
         green_mask_raw = (h >= h_green_low) & (h <= h_green_high) & (s >= s_min) & (v >= v_min)
         blue_mask_raw = (h >= h_blue_low) & (h <= h_blue_high) & (s >= s_min) & (v >= v_min)
         yellow_mask_raw = (h >= h_yellow_low) & (h <= h_yellow_high) & (s >= s_min) & (v >= v_min)
+        magenta_mask_raw = (h >= h_magenta_low) & (h <= h_magenta_high) & (s >= s_min) & (v >= v_min)
 
-        # 3x3 square where all elements are considered neighbors
         struct = generate_binary_structure(2, 2)
         # removes small, isolated bright spots
         red_mask = binary_opening(red_mask_raw, structure=struct, iterations=morph_iters)
@@ -333,8 +355,12 @@ class Experiment:
         yellow_mask = binary_fill_holes(yellow_mask)
         yellow_mask = binary_closing(yellow_mask, structure=struct, iterations=max(1, morph_iters // 2))
         
+        magenta_mask = binary_opening(magenta_mask_raw, structure=struct, iterations=morph_iters)
+        magenta_mask = binary_fill_holes(magenta_mask)
+        magenta_mask = binary_closing(magenta_mask, structure=struct, iterations=max(1, morph_iters // 2))
+
         # Visualizing the 2D Masks
-        fig, axs = plt.subplots(1, 5, figsize=(25, 5))
+        fig, axs = plt.subplots(1, 6, figsize=(30,5))
         axs[0].imshow(color)
         axs[0].set_title('Original Image')
         axs[1].imshow(red_mask, cmap='gray')
@@ -346,6 +372,10 @@ class Experiment:
         
         axs[4].imshow(yellow_mask, cmap='gray')
         axs[4].set_title('Yellow Panel Mask')
+
+        axs[5].imshow(magenta_mask,cmap='gray')
+        axs[5].set_title('Magenta Handle Mask')
+
         plt.savefig("color_masks.png") # Save the figure instead
         plt.close()
 
@@ -378,12 +408,14 @@ class Experiment:
         green_pixels = green_mask.flatten().astype(bool)
         blue_pixels = blue_mask.flatten().astype(bool)    # Added blue
         yellow_pixels = yellow_mask.flatten().astype(bool)  # Added yellow
+        magenta_pixels = magenta_mask.flatten().astype(bool) # Added magenta
        
         point_colors = np.full((points_world.shape[0], 3), [0.6, 0.6, 0.6])
         point_colors[red_pixels] = [1, 0, 0]
         point_colors[green_pixels] = [0, 1, 0]
         point_colors[blue_pixels] = [0, 0, 1]      # Blue
         point_colors[yellow_pixels] = [1, 1, 0]    # Yellow
+        point_colors[magenta_pixels] = [1, 0, 1]
 
         fig = plt.figure()
         scene = fig.add_subplot(projection="3d")
@@ -405,22 +437,24 @@ class Experiment:
         plt.close(fig)
 
         # Scans the mask and finds all separate, contiguous white regions, assigning a unique ID to each one.
-        lab_red, n_red = label(red_mask.astype(np.uint8), structure=struct); 
-        # Find the largest red object by area
-        red_cid_main, _ = max([(cid, (lab_red == cid).sum()) for cid in range(1, n_red + 1)], key=lambda item: item[1])
-        # boolean mask where only the pixels belonging to the largest red object are True
-        idx_red = (lab_red == red_cid_main).reshape(-1); 
-        # selects 3D points from the full-scene point cloud that correspond to the largest red object
-        pts_red = pc_world.reshape(-1, 3)[idx_red]; 
-        # removes any points have invalid coordinate values
-        pts_red = pts_red[np.isfinite(pts_red).all(axis=1)]
-        # calculates the centroid of the red object in the XY plane.
-        centroid_xy_red = np.nanmedian(pts_red[:, :2], axis=0); 
-        # Finds the 95th and 5th percentile of all Z-coordinates.
-        top_z_red = float(np.nanpercentile(pts_red[:, 2], 95)); 
-        low_z_red = float(np.nanpercentile(pts_red[:, 2], 5))
-        # Gathers all the computed statistics into a dictionary
-        red_stats = {"centroid_xy": centroid_xy_red, "top_z": top_z_red, "low_z": low_z_red, "size_xy": np.nanpercentile(pts_red[:, :2], 95, axis=0) - np.nanpercentile(pts_red[:, :2], 5, axis=0)}
+        lab_red, n_red = label(red_mask.astype(np.uint8), structure=struct);
+        
+        red_infos = []
+        red_clusters_info = sorted([(cid, (lab_red == cid).sum()) for cid in range(1, n_red + 1)], key=lambda item: item[1], reverse=True)
+
+        for cid, area in red_clusters_info:
+            idx_red = (lab_red == cid)
+            pts_red = pc_world.reshape(-1, 3)[idx_red.flatten()]
+            pts_red = pts_red[np.isfinite(pts_red).all(axis=1)]
+            if pts_red.shape[0] == 0: continue
+            
+            centroid_xy_red = np.nanmedian(pts_red[:, :2], axis=0)
+            top_z_red = float(np.nanpercentile(pts_red[:, 2], 95))
+            low_z_red = float(np.nanpercentile(pts_red[:, 2], 5))
+            stats = {"centroid_xy": centroid_xy_red, "top_z": top_z_red, "low_z": low_z_red, "size_xy": np.nanpercentile(pts_red[:, :2], 95, axis=0) - np.nanpercentile(pts_red[:, :2], 5, axis=0)}
+            
+            red_infos.append({"cid": cid, "area": area, "stats": stats})
+
         # red_edge = np.clip(float(np.mean(np.abs(red_stats["size_xy"]))), 0.03, 0.06)
         red_edge = 0.04
 
@@ -428,8 +462,8 @@ class Experiment:
         green_infos = []
         # Finds all green objects and sorts them by their area in descending order
         green_clusters_info = sorted([(cid, (lab_green == cid).sum()) for cid in range(1, n_green + 1)], key=lambda item: item[1], reverse=True)
-        # only the two largest green objects
-        for cid, area in green_clusters_info[:2]:
+        
+        for cid, area in green_clusters_info:
             idx_green = (lab_green == cid); 
             pts_green = pc_world.reshape(-1, 3)[idx_green.flatten()]; 
             pts_green = pts_green[np.isfinite(pts_green).all(axis=1)]
@@ -442,7 +476,7 @@ class Experiment:
             d_center = float(np.linalg.norm(stats["centroid_xy"] - np.array([0.5, 0.0])))
             green_infos.append({"cid": cid, "area": area, "stats": stats, "d_center": d_center})
 
-        # 1. Sort by d_center in ascending order, 2. Sorting by area in descending order.
+        # Sort by d_center in ascending order, 2. Sorting by area in descending order.
         green_infos.sort(key=lambda it: (it["d_center"], -it["area"])); 
         # first item in the list (green_infos[0]) is designated as the base block
         base_info, top_info = green_infos[0], green_infos[1]
@@ -451,80 +485,75 @@ class Experiment:
         green_edge = 0.05
         # Estimating the Table Height
         z_table_est = float(np.nanpercentile(pc_world[..., 2].reshape(-1), 1.0))
+
+        # Combine all door-related masks to get the full door's 2D footprint
+        door_mask_with_holes = blue_mask | yellow_mask | magenta_mask
         
+        # We "grow" the mask to fill in gaps. 10 iterations is a good starting point.
+        struct = generate_binary_structure(2, 2)
+        door_mask = binary_dilation(door_mask_with_holes, structure=struct, iterations=10)
         
-        if centroid_xy_red is not None:
+        print("Checking for blocking cubes using centroid projection...")
+        
+        # Create separate lists and masks
+        red_blocking_infos = []
+        green_blocking_infos = []
+        red_blocking_mask = np.zeros_like(red_mask, dtype=bool) 
+        green_blocking_mask = np.zeros_like(green_mask, dtype=bool) 
+        
+        # Get image dimensions for boundary checks
+        height, width = door_mask.shape
+
+        # Check all red cubes
+        for info in red_infos:
+            stats = info['stats']
+            # Get the cube's 3D world centroid (X, Y, Z)
+            xyz_world = np.array([stats['centroid_xy'][0], stats['centroid_xy'][1], stats['top_z']])
             
-            GRIPPER_OPEN_POS = 0.04   # position value for an open gripper
-            GRIPPER_CLOSED_POS = 0.0  # position value for a closed gripper
-            place_clearance = 0.015   # safety distance to ensure gripper doesn't collide with the surface 
-
-            # Calculates the height of the red block
-            h_red = max(0.01, red_stats["top_z"] - red_stats["low_z"])
-            # Determines the optimal Z-coordinate for grasping
-            grasp_z_red = max(z_table_est + 0.45 * h_red, red_stats["top_z"] - grasp_depth)
-
-            hover_pos_red = np.array([red_stats["centroid_xy"][0], red_stats["centroid_xy"][1], red_stats["top_z"] + hover_offset])
-            grasp_pos_red = np.array([red_stats["centroid_xy"][0], red_stats["centroid_xy"][1], grasp_z_red])
-            lift_pos_red = np.array([red_stats["centroid_xy"][0], red_stats["centroid_xy"][1], red_stats["top_z"] + lift_offset])
-
-            # Open the gripper
-            self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_OPEN_POS, count=50)
-            self.move_robot_ik(np.concatenate([hover_pos_red, self.robot_quat]))
-            self.move_robot_ik(np.concatenate([grasp_pos_red, self.robot_quat]))
-            self.sim_wait(5)
-            self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_CLOSED_POS, count=50)
-            self.sim_wait(5)
-            self.move_robot_ik(np.concatenate([lift_pos_red, self.robot_quat]))
-            self.sim_wait(5)
-
-            # Z-coordinate for the center of the red block when it's placed
-            target_center_z_red = float(base_stats["top_z"] + 0.65 * red_edge + place_clearance)
-            # Z-coordinate to retract to after placing the block
-            post_lift_z_red = float(base_stats["top_z"] + red_edge + lift_offset)
-
-            hover_place_pos_red = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], target_center_z_red + hover_offset])
-            place_pos_red = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], target_center_z_red])
-            post_place_pos_red = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], post_lift_z_red])
+            # 1. Calculate the squared distance from the centroid to EVERY 3D point in the point cloud
+            distances_sq = np.sum((pc_world - xyz_world)**2, axis=2)
             
-            self.move_robot_ik(np.concatenate([hover_place_pos_red, self.robot_quat])) 
-            self.move_robot_ik(np.concatenate([place_pos_red, self.robot_quat])) 
-            self.sim_wait(5)
-            self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_OPEN_POS, count=50)
-            self.sim_wait(5)
-            self.move_robot_ik(np.concatenate([post_place_pos_red, self.robot_quat])) 
-            self.sim_wait(5)
+            # 2. Find the (v, u) pixel coordinates of the closest point
+            v, u = np.unravel_index(np.argmin(distances_sq), distances_sq.shape)
+
+            # Check if that pixel (v, u) is on the door
+            if door_mask[v, u]:
+                print(f"  Found blocking RED cube (CID: {info['cid']})")
+                red_blocking_infos.append(info)
+                red_blocking_mask |= (lab_red == info['cid'])
+
+        # Check all green cubes
+        for info in green_infos:
+            stats = info['stats']
+            # Get the cube's 3D world centroid (X, Y, Z)
+            xyz_world = np.array([stats['centroid_xy'][0], stats['centroid_xy'][1], stats['top_z']])
+
+            # Find the closest pixel 
+            distances_sq = np.sum((pc_world - xyz_world)**2, axis=2)
+            v, u = np.unravel_index(np.argmin(distances_sq), distances_sq.shape)
             
-            h_green_top = max(0.01, top_stats["top_z"] - top_stats["low_z"])
-            grasp_z_green = max(z_table_est + 0.4 * h_green_top, top_stats["top_z"] - grasp_depth)
+            # Check if that pixel (v, u) is on the door
+            if door_mask[v, u]:
+                print(f"  Found blocking GREEN cube (CID: {info['cid']})")
+                green_blocking_infos.append(info)
+                green_blocking_mask |= (lab_green == info['cid'])
 
-            hover_pos_green = np.array([top_stats["centroid_xy"][0], top_stats["centroid_xy"][1], top_stats["top_z"] + hover_offset])
-            grasp_pos_green = np.array([top_stats["centroid_xy"][0], top_stats["centroid_xy"][1], grasp_z_green])
-            lift_pos_green = np.array([top_stats["centroid_xy"][0], top_stats["centroid_xy"][1], top_stats["top_z"] + lift_offset])
-
-            self.move_robot_ik(np.concatenate([hover_pos_green, self.robot_quat])); 
-            self.move_robot_ik(np.concatenate([grasp_pos_green, self.robot_quat])); 
-            self.sim_wait(5)
-            self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_CLOSED_POS, count=50) 
-            self.sim_wait(5)
-            self.move_robot_ik(np.concatenate([lift_pos_green, self.robot_quat])) 
-            self.sim_wait(5)
-
-            red_top_after_place = base_stats["top_z"] + red_edge
-            target_center_z_green = float(red_top_after_place + 0.6 * green_edge + place_clearance)
-            post_lift_z_green = float(red_top_after_place + green_edge + lift_offset)
-
-            hover_place_pos_green = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], target_center_z_green + hover_offset])
-            place_pos_green = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], target_center_z_green])
-            post_place_pos_green = np.array([base_stats["centroid_xy"][0], base_stats["centroid_xy"][1], post_lift_z_green])
-
-            self.move_robot_ik(np.concatenate([hover_place_pos_green, self.robot_quat])); 
-            self.sim_wait(5)
-            self.move_robot_ik(np.concatenate([place_pos_green, self.robot_quat])); 
-            self.sim_wait(5)
-            self.move_robot_joint(target_joint_pos=None, target_gripper_pos=GRIPPER_OPEN_POS, count=50)
-            self.sim_wait(5)
-            self.move_robot_ik(np.concatenate([post_place_pos_green, self.robot_quat])); self.sim_wait(10)
+        # Visualize the new Blocking Masks
+        fig, axs = plt.subplots(1, 3, figsize=(15, 5))
+        
+        axs[0].imshow(color)
+        axs[0].set_title('Original Image')
+        
+        axs[1].imshow(red_blocking_mask, cmap='gray')
+        axs[1].set_title('Red Blocking Cubes')
+        
+        axs[2].imshow(green_blocking_mask, cmap='gray')
+        axs[2].set_title('Green Blocking Cubes')
+        
+        plt.savefig("blocking_cubes_masks.png")
+        plt.close(fig)
+        
+        print(f"Found {len(red_blocking_infos)} red and {len(green_blocking_infos)} green blocking cubes.")
 
         # steps simulation but does not command the robot
         while simulation_app.is_running():
@@ -537,7 +566,6 @@ class Experiment:
         # this helps shut down the script correctly
         simulation_app.close()
         
-
 
 if __name__ == "__main__":
 

@@ -123,44 +123,69 @@ class MP2SceneCfg(InteractiveSceneCfg):
         # --- Randomization for Door ---
         # The door asset's built-in height is 0.2, so its center is 0.1 above its base.
         # We place its base on the table (z=0.21), so the center z is 0.21 + 0.1 = 0.31
-        door_z = table_top_z 
+        door_z = table_top_z + 0.01
         door_rot_noise = 180.
         
         # Random position on table (avoiding edges)
         door_x_half_size = 0.15 / 2.0 # From the scale we used
         door_y_half_size = 0.02 / 2.0 # From the scale we used
-        
-        door_x = np.random.uniform(table_min_x + door_x_half_size, 
-                                 table_max_x - door_x_half_size)
-        door_y = np.random.uniform(table_min_y + door_y_half_size, 
-                                 table_max_y - door_y_half_size)
+        margin = 0.1
+        door_x = np.random.uniform(table_min_x + door_x_half_size+margin,
+                                 table_max_x - door_x_half_size - margin)
+        door_y = np.random.uniform(table_min_y + door_y_half_size+margin,
+                                 table_max_y - door_y_half_size-margin)
         
         # Random rotation (yaw only)
-        door_rot_euler = np.array([0.0, 0.0, 0.0])
+        door_rot_euler = np.array([-90.0, 0.0, 0.0])
         door_rot_euler[2] += (np.random.random() - 0.5) * 2. * door_rot_noise
         door_rot_quat = R.from_euler("xyz", door_rot_euler, degrees=True).as_quat()
 
-        
         # Cube properties
         red_cube_size = 0.04
         green_cube_size = 0.05
         # Correct Z-position: table_top_z (0.21) + half_height
         red_cube_z = table_top_z + (red_cube_size / 2.0)     # 0.23
         green_cube_z = table_top_z + (green_cube_size / 2.0)   # 0.235
-        cube_rot_noise = 180
+        cube_rot_noise = 180.
 
-        # --- (NEW) RED CUBES LOOP ---
-        for i in range(10):
-            # Random position
-            red_x = np.random.uniform(table_min_x + red_cube_size / 2.0, table_max_x - red_cube_size / 2.0)
-            red_y = np.random.uniform(table_min_y + red_cube_size / 2.0, table_max_y - red_cube_size / 2.0)
+        placed_positions = []
+        MIN_SEPARATION = 0.07  # Min distance (center-to-center) between any two cubes
+        MAX_RETRIES = 100      # Max attempts to find a free spot for one cube
+
+        for i in range(15):
             
+            valid_position_found = False
+            for _ in range(MAX_RETRIES):
+                # 1. Generate a candidate position
+                red_x = np.random.uniform(table_min_x + red_cube_size / 2.0, table_max_x - red_cube_size / 2.0)
+                red_y = np.random.uniform(table_min_y + red_cube_size / 2.0, table_max_y - red_cube_size / 2.0)
+                candidate_pos = np.array([red_x, red_y])
+                
+                # 2. Check if it's too close to any already placed cubes
+                is_too_close = False
+                for placed_pos in placed_positions:
+                    dist = np.linalg.norm(candidate_pos - placed_pos)
+                    if dist < MIN_SEPARATION:
+                        is_too_close = True
+                        break # It's too close, try a new spot
+                
+                # 3. If it's not too close, accept it
+                if not is_too_close:
+                    valid_position_found = True
+                    break # Found a valid spot
+            
+            if not valid_position_found:
+                print(f"Warning: Could not find a clear spot for red_cube_{i+1}. It may be too close to others.")
+            
+            # 4. Add the new position to our list
+            placed_positions.append(np.array([red_x, red_y]))
+ 
             # Random rotation
             cube_rot_euler = np.array([0.0, 0.0, 0.0])
             cube_rot_euler[2] += (np.random.random() - 0.5) * 2. * cube_rot_noise
             cube_rot_quat = R.from_euler("xyz", cube_rot_euler, degrees=True).as_quat()
             
-            # Create the cube config
+            # Create the cube config (uses the validated red_x and red_y)
             cube_cfg = AssetBaseCfg(
                 prim_path = f'/World/red_cube_{i+1}', # Dynamic prim path (e.g., /World/red_cube_1)
                 spawn = sim_utils.MeshCuboidCfg(
@@ -178,18 +203,41 @@ class MP2SceneCfg(InteractiveSceneCfg):
             # Use setattr to dynamically create self.red_cube_1, self.red_cube_2, etc.
             setattr(self, f'red_cube_{i+1}', cube_cfg)
 
-        # --- (NEW) GREEN CUBES LOOP ---
-        for i in range(10):
-            # Random position
-            green_x = np.random.uniform(table_min_x + green_cube_size / 2.0, table_max_x - green_cube_size / 2.0)
-            green_y = np.random.uniform(table_min_y + green_cube_size / 2.0, table_max_y - green_cube_size / 2.0)
+        for i in range(15):
+   
+            valid_position_found = False
+            for _ in range(MAX_RETRIES):
+                # 1. Generate a candidate position
+                green_x = np.random.uniform(table_min_x + green_cube_size / 2.0, table_max_x - green_cube_size / 2.0)
+                green_y = np.random.uniform(table_min_y + green_cube_size / 2.0, table_max_y - green_cube_size / 2.0)
+                candidate_pos = np.array([green_x, green_y])
+                
+                # 2. Check if it's too close to any already placed cubes (both red and green)
+                is_too_close = False
+                for placed_pos in placed_positions:
+                    dist = np.linalg.norm(candidate_pos - placed_pos)
+                    if dist < MIN_SEPARATION:
+                        is_too_close = True
+                        break # It's too close, try a new spot
+                
+                # 3. If it's not too close, accept it
+                if not is_too_close:
+                    valid_position_found = True
+                    break # Found a valid spot
+            
+            if not valid_position_found:
+                print(f"Warning: Could not find a clear spot for green_cube_{i+1}. It may be too close to others.")
+
+            # 4. Add the new position to our list
+            placed_positions.append(np.array([green_x, green_y]))
             
             # Random rotation
             cube_rot_euler = np.array([0.0, 0.0, 0.0])
             cube_rot_euler[2] += (np.random.random() - 0.5) * 2. * cube_rot_noise
             cube_rot_quat = R.from_euler("xyz", cube_rot_euler, degrees=True).as_quat()
             
-            # Create the cube config
+    
+            # Create the cube config (uses the validated green_x and green_y)
             cube_cfg = AssetBaseCfg(
                 prim_path = f'/World/green_cube_{i+1}', # Dynamic prim path (e.g., /World/green_cube_1)
                 spawn = sim_utils.MeshCuboidCfg(
@@ -206,7 +254,7 @@ class MP2SceneCfg(InteractiveSceneCfg):
             )
             # Use setattr to dynamically create self.green_cube_1, self.green_cube_2, etc.
             setattr(self, f'green_cube_{i+1}', cube_cfg)
-
+       
 
         self.door = DOOR_CONFIG.replace(
             prim_path = '/World/door',
@@ -289,5 +337,3 @@ class MP2SceneCfg(InteractiveSceneCfg):
                 rot = (1.0, 0.0, 0.0, 0.0),
             )
         )
-
-        
