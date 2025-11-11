@@ -138,8 +138,8 @@ class RobotKeyboardController:
 
             elif key.char == "/":
                 self.slash_pressed = True
-            elif key.char == "b": self.b_pressed = True
-            #
+            elif key.char == "b":
+                self.b_pressed = True
         except:
             pass
     
@@ -181,8 +181,9 @@ class RobotKeyboardController:
 
             elif key.char == "/":
                 self.slash_pressed = False
-            #
-            elif key.char == "b": self.b_pressed = False
+            
+            elif key.char == "b": 
+                self.b_pressed = False
         
         except:
             pass
@@ -328,8 +329,6 @@ class RobotKeyboardController:
             # Gets the RGBA image from the wrist camera
             wrist_cam_img = self.scene["wrist_camera"].data.output["rgb"].detach().cpu().numpy()[0]
 
-
-            # -------Q1 Pose estimation
             # Convert RGBA image from Isaac Lab to grayscale for AprilTag detection
             gray_img = cv2.cvtColor(wrist_cam_img, cv2.COLOR_RGBA2GRAY)
 
@@ -416,13 +415,6 @@ class RobotKeyboardController:
             save_key_was_down = self.b_pressed
             # Convert from BGR (OpenCV's default) to RGB for Matplotlib display
             vis_img_rgb = cv2.cvtColor(vis_img, cv2.COLOR_BGR2RGB)
-
-
-            # visualize
-            #self.im.set_data(vis_img_rgb)
-            #self.im.set_data(wrist_cam_img)
-            #plt.pause(0.001)
-            #self.fig.canvas.draw()
 
             # step simulation
             self.scene.write_data_to_sim()
