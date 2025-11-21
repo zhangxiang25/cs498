@@ -43,7 +43,7 @@ def train_model (model, train_dataset, val_dataset):
     # TODO: model training loop
     learning_rate = 1e-3
     batch_size = 64
-    num_epochs = 100
+    num_epochs = 800
 
     train_loader = data.DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     val_loader = data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)

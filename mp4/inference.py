@@ -479,7 +479,8 @@ class Experiment:
 if __name__ == "__main__":
 
     # TODO: change to your model path
-    model_path = "mlp_model.pth"
+    # model_path = "mlp_model.pth"
+    model_path = "policy_model.pth"
 
-    exp = Experiment(policy = "mlp", model_path = model_path)
+    exp = Experiment(policy = "cnn", model_path = model_path)
     exp.inference()
