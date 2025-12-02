@@ -5,13 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 def visualize_trajectories(dataset_dir, output_file):
-    """
-    Loads demonstration trajectories from the dataset directory and visualizes
-    the robot end-effector (x, y, z) positions in a 3D plot.
 
-    :param dataset_dir: Path to the root directory containing demo_0, demo_1, etc.
-    :param output_file: Path and filename where the generated plot will be saved.
-    """
     # Check if the directory exists
     if not os.path.isdir(dataset_dir):
         print(f"Error: Dataset directory not found at '{dataset_dir}'")
@@ -59,17 +53,16 @@ def visualize_trajectories(dataset_dir, output_file):
             all_y_data.append(y)
             all_z_data.append(z)
 
-            # 1. Plot the main trajectory line
             # Use a light color for the line and let markers stand out
             ax.plot(x, y, z, label=f'Demo {demo_count}', linewidth=1.5, alpha=0.7)
 
-            # 2. Mark the Start Point (first point)
+            # Mark the Start Point (first point)
             ax.scatter(x[0:1], y[0:1], z[0:1], 
                        color='green', marker='o', s=100, depthshade=True,
                        label=f'Start (Demo {demo_count})' if demo_count == 0 else None,
                        edgecolors='black', zorder=10) # zorder to ensure it's on top
 
-            # 3. Mark the End Point (last point)
+            # Mark the End Point (last point)
             ax.scatter(x[-1:], y[-1:], z[-1:], 
                        color='red', marker='o', s=80, depthshade=True,
                        label=f'End (Demo {demo_count})' if demo_count == 0 else None,
@@ -78,7 +71,6 @@ def visualize_trajectories(dataset_dir, output_file):
             demo_count += 1
             
         else:
-            # print(f"Skipping {entry}")
             pass
 
     if demo_count == 0:

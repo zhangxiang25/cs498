@@ -373,8 +373,9 @@ class Experiment:
                     cur_image = self.scene["robotview_camera"].data.output["rgb"].detach().cpu().numpy()[0]
                     cur_image = cv2.cvtColor(cur_image, cv2.COLOR_RGB2BGR)
 
-                    model_input = torch.unsqueeze(torch.tensor(cur_image).to(torch.float32), 0)
-
+                    model_input = torch.tensor(cur_image).to(torch.float32).permute(2, 0, 1) / 255.0  # normalize to [0, 1]
+                    model_input = torch.unsqueeze(model_input, 0)  # add batch dimension
+                # ==========================================================================================    
                 # predict
                 with torch.no_grad():
                     action_pred = model(model_input).numpy()

@@ -347,8 +347,8 @@ class Experiment:
             print(" - Press q to start a new episode without saving the data from the current episode\n")
 
             # teleop params
-            max_joint_change = 0.1  # larger = faster movement
-            temp_dist_target = 0.003  # larger = faster movement
+            max_joint_change = 0.15  # larger = faster movement
+            temp_dist_target = 0.005  # larger = faster movement
 
             is_stationary = True
             recorded_stationary_pose = False
