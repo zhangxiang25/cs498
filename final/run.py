@@ -240,7 +240,7 @@ class Experiment:
         self.move_robot_joint(
             target_joint_pos=None,  # Arm doesn't move
             target_gripper_pos=self.gripper_open_val,
-            count=15, # Use a few steps to make it a smooth open
+            count=25, # Use a few steps to make it a smooth open
             time_for_residual_movement=5
         )
         
@@ -250,7 +250,7 @@ class Experiment:
         self.move_robot_joint(
             target_joint_pos=None,  # Arm doesn't move
             target_gripper_pos=self.gripper_close_val,
-            count=15, # Use a few steps to make it a smooth close
+            count=25, # Use a few steps to make it a smooth close
             time_for_residual_movement=5
         )
 
@@ -261,7 +261,7 @@ class Experiment:
     
         # Reset the environment (Relies on default states defined in task_envs.py)
         self.scene.reset()
-        
+        fixed_quat = self.robot_quat.copy()
         # Update internal robot pose trackers after reset
         self.robot_pose = self.scene['ur5e'].data.body_state_w[0, self.scene['ur5e'].find_bodies(self.ik_body)[0][0], :7].detach().cpu().numpy()
         self.robot_pos = self.robot_pose[:3]
@@ -599,16 +599,34 @@ class Experiment:
 
         blocking_ids = [info['cid'] for info in red_blocking_infos]
         
-        # 筛选出 safe cubes (不在 blocking 列表中的)
-        safe_red_infos = [info for info in red_infos if info['cid'] not in blocking_ids]
-        
+        # === 新增：定义桌子边界和安全边距 ===
+        # 根据你提供的数据
+        table_min_x, table_max_x = 0.15, 0.85
+        table_min_y, table_max_y = -0.35, 0.35
+        # 设置安全边距，例如 5cm (0.05m)，保证方块中心离边缘至少有这么远
+        edge_margin = 0.12
+
+        # === 修改：筛选 Safe Cubes (非阻挡 + 不在边缘) ===
+        safe_red_infos = []
+        for info in red_infos:
+            # 1. 排除阻挡方块
+            if info['cid'] in blocking_ids:
+                continue
+            
+            # 2. 检查是否在桌子边缘
+            cx, cy = info['stats']['centroid_xy']
+            is_on_edge = (cx < table_min_x + edge_margin) or \
+                         (cx > table_max_x - edge_margin) or \
+                         (cy < table_min_y + edge_margin) or \
+                         (cy > table_max_y - edge_margin)
+            
+            if is_on_edge:
+                print(f"  Skipping unsafe cube ID {info['cid']} (Too close to edge: {cx:.2f}, {cy:.2f})")
+                continue
+            
+            # 如果既不是阻挡，又不在边缘，则为安全
+            safe_red_infos.append(info)
         # 定义距离计算函数
-        def get_distance_to_door(info):
-            stats = info['stats']
-            # 使用物体的质心 (Centroid XY) 和顶部高度 (Top Z) 组成 3D 坐标
-            cube_pos = np.array([stats['centroid_xy'][0], stats['centroid_xy'][1], stats['top_z']])
-            return np.linalg.norm(cube_pos - door_center_3d)
-        safe_red_infos.sort(key=get_distance_to_door, reverse=True)
         
         print(f"Safe Red Cubes available: {len(safe_red_infos)}")
 
@@ -616,20 +634,18 @@ class Experiment:
         # 我们只能搬运 min(blocking数量, safe数量) 个物体
         num_to_move = min(len(red_blocking_infos), len(safe_red_infos))
         
-        
-
-        fixed_quat = self.robot_quat.copy() 
+         
         
         # 定义高度参数
-        z_travel_height = 0.50  # 搬运过程中的高空飞行高度 (非常安全)
-        z_hover_height = 0.35   # 准备抓取/放置时的悬停高度
+        z_travel_height = 0.35  # 搬运过程中的高空飞行高度 (非常安全)
+        z_hover_height = 0.4   # 准备抓取/放置时的悬停高度
         
         # 抓取高度微调 (根据你之前的需求，这里设为负数表示“悬空抓取”，正数表示“压下去抓”)
         # 如果你想“垂直下降再抓住”，建议设为 0 或者 -0.005 (稍微接触表面)
-        z_offset_grasp = 0.005 
+        z_offset_grasp = 0.012 
         z_offset_stack = 0.025
 
-        for i in range(1):
+        for i in range(num_to_move):
             block_cube = red_blocking_infos[i]
             target_base = safe_red_infos[i]
             
@@ -638,43 +654,43 @@ class Experiment:
             # --- 准备抓取数据 ---
             # 抓取位置
             pick_xy = block_cube['stats']['centroid_xy']
-            pick_z = block_cube['stats']['top_z'] 
+            pick_z = block_cube['stats']['top_z'] +z_offset_grasp
             
             # 放置位置 (目标是 Safe Cube 的顶部)
             place_xy = target_base['stats']['centroid_xy']
-            place_z = target_base['stats']['top_z'] + z_offset_stack
+            place_z = target_base['stats']['top_z'] + 0.04 + z_offset_stack
             
             # --- 动作序列 ---
-            # 1. 确保夹爪张开
-            self.open_gripper()
+         
 
             # 2. 提升到安全高度 (Lift to Travel Height)
             # 先在当前位置垂直抬升，避免横向撞击
             current_xy = self.robot_pos[:2]
-            self.move_robot_ik(np.concatenate([current_xy, [z_travel_height], fixed_quat]))
+            # self.move_robot_ik(np.concatenate([current_xy, [z_travel_height], fixed_quat]))
 
             # 3. 平移到目标正上方 (Move XY to Hover)
             # 在高空平移，此时 Z 轴不变，只变 XY
             hover_pose = np.concatenate([pick_xy, [z_travel_height], fixed_quat])
             self.move_robot_ik(hover_pose)
+            self.open_gripper()
             
             # 如果需要，可以再降到一个较低的悬停点 (Optional Pre-grasp Hover)
             pre_grasp_pose = np.concatenate([pick_xy, [z_hover_height], fixed_quat])
-            self.move_robot_ik(pre_grasp_pose)
+            # self.move_robot_ik(pre_grasp_pose)
 
             # 4. 垂直下降 (Vertical Descent)
             # 这里的关键是：XY 坐标不变，只改变 Z，且使用 fixed_quat 锁死姿态
             print("Descending vertically...")
             pick_pose = np.concatenate([pick_xy, [pick_z], fixed_quat])
             self.move_robot_ik(pick_pose)
-            self.sim_wait(15) # 等待稳定
+            self.sim_wait(10) # 等待稳定
 
             # 5. 抓取 (Grasp)
             self.close_gripper()
-            self.sim_wait(20)
+            self.sim_wait(15)
 
             # 6. 垂直抬起 (Vertical Lift)
-            self.move_robot_ik(pre_grasp_pose)      # 回到低悬停点
+            # self.move_robot_ik(pre_grasp_pose)      # 回到低悬停点
             self.move_robot_ik(hover_pose)          # 回到高空飞行点
 
             # 7. 平移到放置点正上方 (Move to Place)
@@ -682,7 +698,7 @@ class Experiment:
             self.move_robot_ik(place_hover_pose)
             
             place_pre_pose = np.concatenate([place_xy, [z_hover_height], fixed_quat])
-            self.move_robot_ik(place_pre_pose)
+            # self.move_robot_ik(place_pre_pose)
 
             # 8. 垂直下降放置 (Vertical Descent to Place)
             place_pose = np.concatenate([place_xy, [place_z], fixed_quat])
@@ -694,9 +710,183 @@ class Experiment:
             self.sim_wait(20)
 
             # 10. 垂直撤离 (Retreat)
-            self.move_robot_ik(place_pre_pose)
             self.move_robot_ik(place_hover_pose)
+            # self.move_robot_ik(place_hover_pose)
         print("Red Cube clearing completed.")
+
+        blocking_green_ids = [info['cid'] for info in green_blocking_infos]
+        
+        # 1. 筛选 Safe Green Cubes (非阻挡 + 不在边缘)
+        safe_green_infos = []
+        for info in green_infos:
+            if info['cid'] in blocking_green_ids:
+                continue
+            
+            cx, cy = info['stats']['centroid_xy']
+            # 使用之前定义的边界参数
+            is_on_edge = (cx < table_min_x + edge_margin) or \
+                         (cx > table_max_x - edge_margin) or \
+                         (cy < table_min_y + edge_margin) or \
+                         (cy > table_max_y - edge_margin)
+            
+            if is_on_edge:
+                print(f"  Skipping unsafe green cube ID {info['cid']} (Too close to edge)")
+                continue
+            
+            safe_green_infos.append(info)
+
+        
+        print(f"Safe Green Cubes available: {len(safe_green_infos)}")
+
+        # 3. 搬运循环
+        num_green_to_move = min(len(green_blocking_infos), len(safe_green_infos))
+        
+        # 绿色方块通常比红色略大 (Red=0.04, Green=0.05)
+        # 这个高度用于计算堆叠时的 Z 轴偏移
+        green_cube_height = 0.05 
+
+        for i in range(num_green_to_move):
+            block_cube = green_blocking_infos[i]
+            target_base = safe_green_infos[i]
+            
+            print(f"Moving Blocking Green Cube ID {block_cube['cid']} to Safe Green ID {target_base['cid']}")
+            
+            # --- 坐标计算 ---
+            pick_xy = block_cube['stats']['centroid_xy']
+            # 抓取高度保持一致
+            pick_z = block_cube['stats']['top_z'] + z_offset_grasp 
+            
+            place_xy = target_base['stats']['centroid_xy']
+            # 【注意】这里把 0.04 改为了 green_cube_height (0.05)，适应绿色方块的高度
+            place_z = target_base['stats']['top_z'] + green_cube_height + z_offset_stack
+            
+            # --- 动作序列 (Manhattan Path) ---
+            
+            # 1. 移动到抓取点上方 (Hover)
+            hover_pose = np.concatenate([pick_xy, [z_travel_height], fixed_quat])
+            self.move_robot_ik(hover_pose)
+            self.open_gripper()
+            
+            # 2. 垂直下降抓取 (Descend to Pick)
+            print("Descending vertically (Green)...")
+            pick_pose = np.concatenate([pick_xy, [pick_z], fixed_quat])
+            self.move_robot_ik(pick_pose)
+            self.sim_wait(10)
+
+            # 3. 闭合夹爪 (Grasp)
+            self.close_gripper()
+            self.sim_wait(15)
+
+            # 4. 垂直抬起 (Lift)
+            self.move_robot_ik(hover_pose)
+
+            # 5. 平移到放置点上方 (Move to Place Hover)
+            place_hover_pose = np.concatenate([place_xy, [z_travel_height], fixed_quat])
+            self.move_robot_ik(place_hover_pose)
+            
+            # 6. 垂直下降放置 (Descend to Place)
+            place_pose = np.concatenate([place_xy, [place_z], fixed_quat])
+            self.move_robot_ik(place_pose)
+            self.sim_wait(15)
+
+            # 7. 松开 (Release)
+            self.open_gripper()
+            self.sim_wait(20)
+
+            # 8. 撤离 (Retreat)
+            self.move_robot_ik(place_hover_pose)
+
+        print("Green Cube clearing completed.")
+        print("\n=== Performing Final Check ===")
+        
+        # 1. 把机器人移开 (Move robot away to clear view)
+        self.move_robot_ik(np.concatenate([away_pos, self.robot_quat]))
+        self.sim_wait(20)
+
+        # 2. 重新获取图像数据 (Capture new data)
+        color_raw = self.scene["birdview_camera"].data.output["rgb"].detach().cpu().numpy()[0]
+        color = color_raw[:, :, :3] if color_raw.shape[2] == 4 else color_raw
+        depth_image = np.squeeze(self.scene["birdview_camera"].data.output["depth"].detach().cpu().numpy()[0])
+        
+        # 3. 重新计算 Mask (Re-calculate Masks using existing thresholds)
+        rgb01 = np.clip(color.astype(np.float32)/255.0, 0.0, 1.0)
+        hsv = mcolors.rgb_to_hsv(rgb01)
+        h, s, v = hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+
+        # Red Mask Check
+        red1_check = (h >= h_red_low_1) & (h <= h_red_high_1) & (s >= s_min) & (v >= v_min)
+        red2_check = (h >= h_red_low_2) & (h <= h_red_high_2) & (s >= s_min) & (v >= v_min)
+        red_mask_check = red1_check | red2_check
+        red_mask_check = binary_opening(red_mask_check, structure=struct, iterations=morph_iters)
+        red_mask_check = binary_fill_holes(red_mask_check)
+        red_mask_check = binary_closing(red_mask_check, structure=struct, iterations=max(1, morph_iters // 2))
+
+        # Green Mask Check
+        green_mask_check = (h >= h_green_low) & (h <= h_green_high) & (s >= s_min) & (v >= v_min)
+        green_mask_check = binary_opening(green_mask_check, structure=struct, iterations=morph_iters)
+        green_mask_check = binary_fill_holes(green_mask_check)
+        green_mask_check = binary_closing(green_mask_check, structure=struct, iterations=max(1, morph_iters // 2))
+
+        # 4. 重新生成点云 (Re-generate Point Cloud)
+        z_c = depth_image
+        x_c = z_c * (x_pixel - cx) / fx
+        y_c = z_c * (y_pixel - cy) / fy
+        points_camera = np.stack((x_c, y_c, z_c), axis=-1).reshape(-1, 3) 
+        ones = np.ones((points_camera.shape[0], 1), dtype=points_camera.dtype)
+        points_world_h = extrinsics @ np.concatenate([points_camera, ones], axis=1).T
+        points_world = (points_world_h[:3,:] / np.clip(points_world_h[3,:], 1e-8, None)).T
+        pc_world_check = points_world.reshape(height, width, 3)
+
+        # 5. 检查剩余的 Blocking Cubes (Check remaining)
+        final_blocking_count = 0
+        
+        # Check Red
+        lab_red_check, n_red_check = label(red_mask_check.astype(np.uint8), structure=struct)
+        for cid in range(1, n_red_check + 1):
+            idx = (lab_red_check == cid)
+            pts = pc_world_check.reshape(-1, 3)[idx.flatten()]
+            pts = pts[np.isfinite(pts).all(axis=1)]
+            if pts.shape[0] == 0: continue
+            
+            # 计算新的质心
+            centroid_xy = np.nanmedian(pts[:, :2], axis=0)
+            centroid_z = float(np.nanpercentile(pts[:, 2], 95))
+            
+            # 投影回像素坐标
+            xyz_world = np.array([centroid_xy[0], centroid_xy[1], centroid_z])
+            distances_sq = np.sum((pc_world_check - xyz_world)**2, axis=2)
+            v, u = np.unravel_index(np.argmin(distances_sq), distances_sq.shape)
+            
+            # 检查是否还在门上 (Reuse door_mask)
+            if door_mask[v, u]:
+                print(f"  [WARNING] Found remaining RED blocking cube!")
+                final_blocking_count += 1
+
+        # Check Green
+        lab_green_check, n_green_check = label(green_mask_check.astype(np.uint8), structure=struct)
+        for cid in range(1, n_green_check + 1):
+            idx = (lab_green_check == cid)
+            pts = pc_world_check.reshape(-1, 3)[idx.flatten()]
+            pts = pts[np.isfinite(pts).all(axis=1)]
+            if pts.shape[0] == 0: continue
+            
+            centroid_xy = np.nanmedian(pts[:, :2], axis=0)
+            centroid_z = float(np.nanpercentile(pts[:, 2], 95))
+            
+            xyz_world = np.array([centroid_xy[0], centroid_xy[1], centroid_z])
+            distances_sq = np.sum((pc_world_check - xyz_world)**2, axis=2)
+            v, u = np.unravel_index(np.argmin(distances_sq), distances_sq.shape)
+            
+            if door_mask[v, u]:
+                print(f"  [WARNING] Found remaining GREEN blocking cube!")
+                final_blocking_count += 1
+
+        # 6. 输出最终结果
+        if final_blocking_count == 0:
+            print(f"\nSUCCESS: All blocking cubes removed! Door area is clear.")
+        else:
+            print(f"\nFAILURE: {final_blocking_count} cubes are still blocking the door.")
+            
         # steps simulation but does not command the robot
         while simulation_app.is_running():
 

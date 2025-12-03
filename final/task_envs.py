@@ -129,7 +129,7 @@ class MP2SceneCfg(InteractiveSceneCfg):
         # Random position on table (avoiding edges)
         door_x_half_size = 0.15 / 2.0 # From the scale we used
         door_y_half_size = 0.02 / 2.0 # From the scale we used
-        margin = 0.1
+        margin = 0.15
         door_x = np.random.uniform(table_min_x + door_x_half_size+margin,
                                  table_max_x - door_x_half_size - margin)
         door_y = np.random.uniform(table_min_y + door_y_half_size+margin,
