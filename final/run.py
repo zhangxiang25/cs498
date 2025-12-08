@@ -1,11 +1,13 @@
 import argparse
-
+import os
+import sys
 from isaaclab.app import AppLauncher
+from collections import deque, Counter
 
 # add argparse arguments
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_envs", type = int, default = 1, help = "Number of environments to spawn.")
-
+parser.add_argument("--model_path", type = str, default = "mlp_model_door.pth", help = "Path to trained door model") # Added model path arg
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -17,6 +19,7 @@ simulation_app = app_launcher.app
 
 import numpy as np
 import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
 from matplotlib import colors as mcolors
 
@@ -24,7 +27,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
-
+from scipy.spatial.transform import Rotation as R
 # from scipy.spatial.transform import Rotation
 from scipy.ndimage import ( # Needed for advanced image processing
     binary_opening, binary_closing, binary_fill_holes,
@@ -33,6 +36,25 @@ from scipy.ndimage import ( # Needed for advanced image processing
 
 from task_envs import MP2SceneCfg, PHYSICS_DT, RENDERING_DT
 
+# === 添加 Policy 类定义 (必须与训练脚本一致) ===
+class Policy(nn.Module):
+    def __init__(self):
+        super(Policy, self).__init__()
+        # Input: 8 dims [Rob_X, Rob_Y, Rob_Z, Grip, Door_X, Door_Y, Door_Z, Yaw]
+        # Output: 11 dims [Acts...]
+        self.net = nn.Sequential(
+            nn.Linear(8, 256),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, 256),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(256, 11)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+# =================================================
 
 # wrap everything into a class so it is easier to access things
 class Experiment:
@@ -83,7 +105,33 @@ class Experiment:
 
         self.gripper_open_val = 0.04
         self.gripper_close_val = 0.0 # This is just a guess
+
+        # === ADDED: Load Policy Model ===
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.policy_model = Policy().to(self.device)
         
+        # Use provided arg or default to local file
+        model_path = args_cli.model_path
+        if os.path.exists(model_path):
+            try:
+                self.policy_model.load_state_dict(torch.load(model_path, map_location=self.device))
+                self.policy_model.eval()
+                print(f"[SUCCESS] Loaded Door Policy model from {model_path}")
+            except Exception as e:
+                print(f"[ERROR] Failed to load model weights: {e}")
+        else:
+            print(f"[WARNING] Model file NOT found at: {model_path}. Door opening phase will likely fail.")
+        # ================================
+    
+    # === ADDED: Helper for Door Position ===
+    def get_door_pos(self):
+        # Assumes the door prim is named "door" in MP2SceneCfg
+        return torch.squeeze(self.scene["door"].data.root_link_pos_w).detach().cpu().numpy()
+
+    def get_current_eef_pos(self):
+        # Helper to get fresh EEF pos for the policy loop
+        return self.scene["ur5e"].data.body_state_w[0, self.scene["ur5e"].find_bodies(self.ik_body)[0][0], :7].detach().cpu().numpy()[:3]
+    # =======================================
  
 
     def move_robot_joint (self, target_joint_pos, target_gripper_pos, count = 10, time_for_residual_movement = 5):
@@ -253,6 +301,179 @@ class Experiment:
             count=25, # Use a few steps to make it a smooth close
             time_for_residual_movement=5
         )
+    # === ADDED: Main Logic from eval_mlp_door.py ===
+    def run_door_policy(self):
+        print("\n\n[DOOR POLICY] Starting Door Opening Phase...")
+        
+        # 1. Warm-up: Move robot to start position defined in eval_mlp_door
+        # We use existing move_robot_ik for this transition to ensure we get there safely
+        start_pos = np.array([0.4, 0.0, 0.35]) 
+        # Defines the default orientation for the policy (pointing forward/down)
+        base_quat = np.array([0, -np.sqrt(2)/2, np.sqrt(2)/2, 0]) 
+        
+        start_pose = np.concatenate([start_pos, base_quat])
+        
+        print("[DOOR POLICY] Moving to policy start position...")
+        self.move_robot_ik(start_pose, timeout_count=200)
+        self.open_gripper() # Ensure gripper is open
+
+        # 2. Variables for Policy Loop
+        max_steps = 1000
+        temp_dist_target = 0.0018
+        rot_step = 0.05
+        max_joint_change = 0.10
+        
+        # State tracking
+        current_yaw = 0.0 # Policy assumes we start at 0 relative yaw from base_quat
+        gripper_state = -1 # -1 is Open
+        is_rot_aligned = False
+        
+        # Smoothing Buffer
+        history_len = 5
+        action_history = deque(maxlen=history_len)
+
+        print("[DOOR POLICY] Handing over control to Neural Network...")
+        
+        # 3. Policy Loop
+        for step in range(max_steps):
+            if not simulation_app.is_running(): break
+            
+            # --- A. Get Observations ---
+            current_robot_pos = self.get_current_eef_pos()
+            current_door_pos = self.get_door_pos()
+            
+            # Construct 8-dim input
+            obs_vector = np.array([
+                current_robot_pos[0],
+                current_robot_pos[1],
+                current_robot_pos[2],
+                gripper_state,
+                current_door_pos[0],
+                current_door_pos[1],
+                current_door_pos[2],
+                current_yaw
+            ])
+
+            # --- B. Inference ---
+            obs_tensor = torch.FloatTensor(obs_vector).unsqueeze(0).to(self.device)
+            with torch.no_grad():
+                logits = self.policy_model(obs_tensor)
+
+                # --- C. Apply Heuristic Masks (Copied exactly from eval script) ---
+                # 1. Rotation Locking
+                if abs(current_yaw) > 1.45: is_rot_aligned = True
+                if is_rot_aligned:
+                    logits[0, 8] = -1e9 # Block Stationary
+                    logits[0, 9] = -1e9 # Block Rot +
+                    logits[0, 10] = -1e9 # Block Rot -
+
+                # 2. Geometric Alignment Logic
+                diff_y = abs(current_robot_pos[1] - current_door_pos[1])
+                diff_x = abs(current_robot_pos[0] - current_door_pos[0]) 
+                
+                is_x_aligned = diff_x > 0.20 # Reached edge
+                is_y_aligned = diff_y < 0.02 # Centered
+
+                # 3. High Altitude Logic
+                if not (is_x_aligned and is_y_aligned):
+                    # Phase A: Not aligned yet
+                    logits[0, 5] = -1e9 # Block Down (-Z)
+                    logits[0, 7] = -1e9 # Block Close Gripper
+
+                    if not is_x_aligned:
+                        # Block Y motion, focus on X
+                        logits[0, 2] = -1e9
+                        logits[0, 3] = -1e9
+                else:
+                    # Phase B: Aligned (Descent)
+                    if current_robot_pos[2] < 0.28:
+                        # Close to handle -> Encourage Grasp
+                        logits[0, 7] = 1e9  
+                        # Block movements to stabilize grasp
+                        logits[0, 0] = -1e20
+                        logits[0, 1] = -1e20
+                        logits[0, 2] = -1e20
+                        logits[0, 3] = -1e20
+                        logits[0, 8] = -1e20 
+                        logits[0, 9] = -1e20 
+                        logits[0, 10] = -1e20
+                    else:
+                        logits[0, 7] = -1e9 # Too high to grasp
+
+                raw_action_idx = torch.argmax(logits, dim=1).item()
+
+            # --- D. Smoothing ---
+            action_history.append(raw_action_idx)
+            if len(action_history) == history_len:
+                final_action_idx = Counter(action_history).most_common(1)[0][0]
+            else:
+                final_action_idx = raw_action_idx
+
+            if step % 50 == 0:
+                print(f"[DOOR STEP {step}] Act: {final_action_idx} | Yaw: {current_yaw:.2f} | Z: {current_robot_pos[2]:.3f}")
+
+            # --- E. Execute Action (Calculate Target) ---
+            target_pos = current_robot_pos.copy()
+            
+            # Map index to action
+            if final_action_idx == 0: target_pos[0] += temp_dist_target
+            elif final_action_idx == 1: target_pos[0] -= temp_dist_target
+            elif final_action_idx == 2: target_pos[1] += temp_dist_target
+            elif final_action_idx == 3: target_pos[1] -= temp_dist_target
+            elif final_action_idx == 4: target_pos[2] += temp_dist_target
+            elif final_action_idx == 5: target_pos[2] -= temp_dist_target
+            elif final_action_idx == 6: gripper_state = -1 # Open
+            elif final_action_idx == 7: gripper_state = 1  # Close
+            elif final_action_idx == 8: pass # Stationary
+            elif final_action_idx == 9: current_yaw += rot_step 
+            elif final_action_idx == 10: current_yaw -= rot_step 
+
+            # Calculate Orientation
+            base_rot = R.from_quat([base_quat[1], base_quat[2], base_quat[3], base_quat[0]]) 
+            z_rot = R.from_euler('z', current_yaw)
+            final_rot = base_rot * z_rot
+            final_quat_scipy = final_rot.as_quat() 
+            target_quat = np.array([final_quat_scipy[3], final_quat_scipy[0], final_quat_scipy[1], final_quat_scipy[2]])
+
+            target_pose = np.concatenate([target_pos, target_quat])
+            
+            # --- F. Low-Level Control (Non-Blocking IK) ---
+            # We use the lower-level set_command and direct stepping here rather than self.move_robot_ik
+            # because the policy needs to run continuously per step.
+            self.diff_ik_controller.set_command(torch.tensor(target_pose, device=self.sim.device))
+
+            jacobian = self.scene["ur5e"].root_physx_view.get_jacobians()[:, self.ee_jacobi_idx, :, self.robot_entity_cfg.joint_ids]
+            ee_pose_w = self.scene["ur5e"].data.body_state_w[:, self.robot_entity_cfg.body_ids[0], 0:7]
+            joint_pos = self.scene["ur5e"].data.joint_pos[:, self.robot_entity_cfg.joint_ids]
+            
+            # Compute IK
+            joint_pos_des = self.diff_ik_controller.compute(ee_pose_w[:, 0:3], ee_pose_w[:, 3:7], jacobian, joint_pos)
+
+            # Limit joint changes (Safety)
+            joint_changes = (joint_pos_des - joint_pos).detach().cpu().numpy()[0]
+            if np.sum(np.abs(joint_changes) > max_joint_change) > 0:
+                scaled_joint_changes = joint_changes / (np.max(np.abs(joint_changes)) / max_joint_change)
+                scaled_joint_changes = torch.tensor(scaled_joint_changes).unsqueeze(0).to(joint_pos_des.device)
+                joint_pos_des = joint_pos + scaled_joint_changes
+
+            # Construct full command (Arm + Gripper)
+            all_joint_pos_des = torch.zeros((1, 8))
+            all_joint_pos_des[:, :6] = joint_pos_des
+            
+            # Handle Gripper
+            if gripper_state == -1:
+                all_joint_pos_des[:, 6:] = torch.tensor([self.gripper_open_val, self.gripper_open_val]).to(self.sim.device)
+            else:
+                all_joint_pos_des[:, 6:] = torch.tensor([self.gripper_close_val, self.gripper_close_val]).to(self.sim.device)
+
+            # Apply
+            self.scene["ur5e"].set_joint_position_target(all_joint_pos_des)
+            self.scene.write_data_to_sim()
+            self.sim.step()
+            self.scene.update(self.sim_dt)
+
+        print("[DOOR POLICY] Max steps reached or app closed.")
+
 
     def run (self):
         '''
@@ -884,9 +1105,10 @@ class Experiment:
         # 6. 输出最终结果
         if final_blocking_count == 0:
             print(f"\nSUCCESS: All blocking cubes removed! Door area is clear.")
+            
         else:
             print(f"\nFAILURE: {final_blocking_count} cubes are still blocking the door.")
-            
+        self.run_door_policy()    
         # steps simulation but does not command the robot
         while simulation_app.is_running():
 

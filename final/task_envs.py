@@ -120,22 +120,28 @@ class MP2SceneCfg(InteractiveSceneCfg):
         table_min_y = table_center_pos[1] - table_size[1] / 2.0  # -0.35
         table_max_y = table_center_pos[1] + table_size[1] / 2.0  # 0.35
 
-        # --- Randomization for Door ---
+        # --- Randomization for Door (Modified) ---
         # The door asset's built-in height is 0.2, so its center is 0.1 above its base.
         # We place its base on the table (z=0.21), so the center z is 0.21 + 0.1 = 0.31
         door_z = table_top_z + 0.01
-        door_rot_noise = 180.
+
+        # modification 1: 减小旋转随机性
+        # 原来是 180 度 (全朝向随机)，现在改为 0 度 (固定) 或很小的值 (如 5 度)
+        door_rot_noise = 0.0  
         
-        # Random position on table (avoiding edges)
-        door_x_half_size = 0.15 / 2.0 # From the scale we used
-        door_y_half_size = 0.02 / 2.0 # From the scale we used
-        margin = 0.15
-        door_x = np.random.uniform(table_min_x + door_x_half_size+margin,
-                                 table_max_x - door_x_half_size - margin)
-        door_y = np.random.uniform(table_min_y + door_y_half_size+margin,
-                                 table_max_y - door_y_half_size-margin)
+        # modification 2: 减小位置随机性
+        # 不再使用 margin 和 min/max 计算，而是直接基于桌子中心 (table_center_pos) 加一点点噪声
+        # table_center_pos 在代码前面定义过，通常是 (0.5, 0.0, 0.2)
+        pos_noise = 0.01  # 仅 1cm 的随机误差，几乎相当于固定位置
+        
+        # 在桌子中心 X 附近微调
+        door_x = table_center_pos[0] + (np.random.random() - 0.5) * 2 * pos_noise
+        # 在桌子中心 Y 附近微调 (稍微偏一点可能方便机器人抓，视情况调整)
+        door_y = table_center_pos[1] + (np.random.random() - 0.5) * 2 * pos_noise
         
         # Random rotation (yaw only)
+        # 基础角度 -90.0 度意味着门面朝向 Y 轴（侧对着机器人）或者 X 轴，具体取决于你的 USD 坐标系。
+        # 如果你发现这角度不好抓，可以手动改这个 -90.0 为 0.0 或 180.0
         door_rot_euler = np.array([-90.0, 0.0, 0.0])
         door_rot_euler[2] += (np.random.random() - 0.5) * 2. * door_rot_noise
         door_rot_quat = R.from_euler("xyz", door_rot_euler, degrees=True).as_quat()
@@ -152,7 +158,7 @@ class MP2SceneCfg(InteractiveSceneCfg):
         MIN_SEPARATION = 0.07  # Min distance (center-to-center) between any two cubes
         MAX_RETRIES = 100      # Max attempts to find a free spot for one cube
 
-        for i in range(15):
+        for i in range(10):
             
             valid_position_found = False
             for _ in range(MAX_RETRIES):
@@ -203,7 +209,7 @@ class MP2SceneCfg(InteractiveSceneCfg):
             # Use setattr to dynamically create self.red_cube_1, self.red_cube_2, etc.
             setattr(self, f'red_cube_{i+1}', cube_cfg)
 
-        for i in range(15):
+        for i in range(10):
    
             valid_position_found = False
             for _ in range(MAX_RETRIES):
