@@ -258,7 +258,6 @@ class Experiment:
         while True:
 
             # TODO: model definition
-            # ==========================================================================================
 
             if self.policy == "mlp":
                 from train_mlp import Policy
@@ -272,7 +271,6 @@ class Experiment:
             model.eval()
             model.to('cpu')
 
-            # ==========================================================================================
             
             # we do not need to change the robot eef orientation
             target_quat = np.array([0, -np.sqrt(2), np.sqrt(2), 0])
@@ -306,8 +304,6 @@ class Experiment:
                 if self.start_new_episode:
 
                     # DO NOT MODIFY THE RESET CODE
-                    
-                    # ===== reset robot =====
 
                     # set root state
                     ur5e_state = self.scene["ur5e"].data.default_root_state.clone()
@@ -321,9 +317,6 @@ class Experiment:
                         self.scene["ur5e"].data.default_joint_vel.clone(),
                     )
                     self.scene["ur5e"].write_joint_state_to_sim(joint_pos, joint_vel)
-
-
-                    # ===== reset cubes =====
 
                     # randomize cube poses
                     center_x = 0.5
@@ -350,7 +343,6 @@ class Experiment:
                 
 
                 # TODO: predict action. you might want to modify the input based on your model definition
-                # ==========================================================================================
 
                 # compile observations
                 # input("Press enter to predict next action\n")
@@ -375,15 +367,11 @@ class Experiment:
 
                     model_input = torch.tensor(cur_image).to(torch.float32).permute(2, 0, 1) / 255.0  # normalize to [0, 1]
                     model_input = torch.unsqueeze(model_input, 0)  # add batch dimension
-                # ==========================================================================================    
                 # predict
                 with torch.no_grad():
                     action_pred = model(model_input).numpy()
-                
-                # ==========================================================================================
 
                 
-                # print(np.round(action_pred, 3), "\n")
                 action_index = np.argmax(action_pred)  # [+x, -x, +y, -y, +z, -z, gripper_open, gripper_close, stationary]
 
                 # set new robot pose according to model prediction
