@@ -11,8 +11,6 @@ import cv2
 import matplotlib.pyplot as plt
 import torchvision.transforms as transforms
 
-
-# --- NEW FUNCTION: Loss Plotting ---
 def plot_learning_curve(train_losses, val_losses):
     plt.figure(figsize=(10, 5))
     plt.plot(train_losses, label='Training Loss')
@@ -108,10 +106,6 @@ class Policy (nn.Module):
         )
     
     def forward (self, image):
-
-        # image will have shape (N, H, W, C), but needs to have shape (N, C, H, W)
-        #image = torch.swapaxes(image, 1, 3)
-        #image = torch.swapaxes(image, 2, 3)
         
         # encode image
         encoded_image = self.encoder(image)
