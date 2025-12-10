@@ -27,8 +27,6 @@ import isaaclab.sim as sim_utils
 from isaaclab.controllers import DifferentialIKController, DifferentialIKControllerCfg
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
-
-# !!! IMPORT YOUR NEW DOOR CONFIG HERE !!!
 from task_envs_door import DoorSceneCfg, PHYSICS_DT, RENDERING_DT
 
 
@@ -159,39 +157,28 @@ class Experiment:
         episode_counter = len(os.listdir(self.dataset_dir)) if self.dataset_dir is not None and os.path.exists(self.dataset_dir) else 0
 
         while True:
-            
-            # ================= MODIFICATION START =================
-            # 1. 强制定义每轮初始位置 (Forced Initial Position)
             start_pos = np.array([0.4, 0.0, 0.3]) 
-            
-            # 2. Reset Yaw to 0 (pointing down)
+
             # This quaternion corresponds to [0, -1, 1, 0] unnormalized (w, x, y, z order dependent on controller, usually wxyz in Isaac)
-            # Based on your script's logic:
             base_quat = np.array([0, -np.sqrt(2)/2, np.sqrt(2)/2, 0]) 
             current_yaw = 0.0
             
-            # 3. Construct Start Pose
             # Concatenate Position + Quaternion
             start_pose = np.concatenate([start_pos, base_quat])
-            
-            # 4. Reset Controller and Force Move
+
             self.diff_ik_controller.reset()
             self.diff_ik_controller.set_command(torch.tensor(start_pose, device = self.sim.device))
             
             print(f"\nEpisode {episode_counter}: Resetting robot to start position {start_pos}...")
 
-            # 5. Warm-up Loop: 自动运行 60 步，让机器人物理移动到起点
-            # 如果不加这一段，机器人不会真的瞬移过去，而是在你按下按键时才开始修正
+
             for _ in range(60):
-                # 获取当前状态
                 jacobian = self.scene["ur5e"].root_physx_view.get_jacobians()[:, self.ee_jacobi_idx, :, self.robot_entity_cfg.joint_ids]
                 ee_pose_w = self.scene["ur5e"].data.body_state_w[:, self.robot_entity_cfg.body_ids[0], 0:7]
                 joint_pos = self.scene["ur5e"].data.joint_pos[:, self.robot_entity_cfg.joint_ids]
                 
-                # 计算 IK
                 joint_pos_des = self.diff_ik_controller.compute(ee_pose_w[:, 0:3], ee_pose_w[:, 3:7], jacobian, joint_pos)
                 
-                # 设置关节目标 (默认 gripper 打开)
                 all_joint_pos_des = torch.zeros((1, 8))
                 all_joint_pos_des[:, :6] = joint_pos_des
                 all_joint_pos_des[:, 6:] = torch.tensor([0.05, 0.05]).to(self.sim.device)
@@ -201,7 +188,6 @@ class Experiment:
                 self.sim.step()
             
             print("Robot ready. Starting Teleop...")
-            # ================= MODIFICATION END =================
             
             
             # initialize keyboard listener
@@ -253,7 +239,7 @@ class Experiment:
                         # Append end padding
                         end_observation = state_observations[-1].copy()
                         end_observation[3] = -1 
-                        end_action = np.zeros(11) # CHANGED to 11
+                        end_action = np.zeros(11) 
                         end_action[8] = 1 # Stationary action index is now 8
 
                         cur_image = self.scene["birdview_camera"].data.output["rgb"].detach().cpu().numpy()[0]
@@ -280,7 +266,6 @@ class Experiment:
                             shutil.rmtree("{}/demo_{}".format(self.dataset_dir, episode_counter))
                         print("\nDiscarded.\n")
 
-                    # ===== RESET =====
                     ur5e_state = self.scene["ur5e"].data.default_root_state.clone()
                     self.scene["ur5e"].write_root_pose_to_sim(ur5e_state[:, :7])
                     self.scene["ur5e"].write_root_velocity_to_sim(ur5e_state[:, 7:])
@@ -385,7 +370,6 @@ class Experiment:
                     # Update stationary pose orientation from current_yaw
                     stationary_pose[3:] = target_quat
 
-                # === DATA SAVING LOGIC ===
                 cur_image = self.scene["birdview_camera"].data.output["rgb"].detach().cpu().numpy()[0]
                 cur_image = cv2.cvtColor(cur_image, cv2.COLOR_RGB2BGR)
                 
@@ -397,7 +381,6 @@ class Experiment:
                     if self.z_pressed or self.x_pressed or self.c_pressed or self.d_pressed or self.v_pressed or self.g_pressed or \
                         self.e_pressed or self.r_pressed or (gripper_state != last_saved_gripper_state):
 
-                        # === OBSERVATION (8 DIMENSIONS) ===
                         # Added current_yaw at the end
                         cur_observation = np.array([
                             last_saved_robot_pos[0],
@@ -407,10 +390,9 @@ class Experiment:
                             last_saved_door_pos[0],
                             last_saved_door_pos[1],
                             last_saved_door_pos[2],
-                            last_saved_yaw # <--- NEW: Rotation State
+                            last_saved_yaw 
                         ])
 
-                        # === ACTION (11 DIMENSIONS) ===
                         # [x+, x-, y+, y-, z+, z-, open, close, stationary, rot+, rot-]
                         cur_action = np.zeros(11)
                         if self.x_pressed: cur_action[0] = 1
