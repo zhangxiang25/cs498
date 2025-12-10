@@ -213,8 +213,7 @@ class DaggerExperiment:
             while simulation_app.is_running():
                 if self.reset_episode:
                     break
-                
-                # --- CHANGE 1: Capture Image for Inference ---
+
                 # Get the raw image from the simulator
                 # Shape comes in as (1, Height, Width, 3)
                 raw_img_tensor = self.scene["robotview_camera"].data.output["rgb"].clone()
@@ -234,7 +233,6 @@ class DaggerExperiment:
                 action_idx = 8 # Default to stationary
                 
                 if self.policy_mode:
-                    # --- CHANGE 2: Preprocess Image and Feed to Model ---
                     # Rearrange from (Batch, H, W, Channel) to (Batch, Channel, H, W)
                     # And normalize to [0, 1]
                     img_input = raw_img_tensor.permute(0, 3, 1, 2).float() / 255.0
@@ -328,7 +326,6 @@ class DaggerExperiment:
                         img_dir = os.path.join(self.dataset_dir, f"demo_{episode_counter}", "images")
                         if not os.path.exists(img_dir): os.makedirs(img_dir)
                         
-                        # --- CHANGE 3: Use the tensor we already captured ---
                         # Convert tensor back to numpy for saving with OpenCV
                         cur_image = raw_img_tensor[0].detach().cpu().numpy()
                         cur_image = cv2.cvtColor(cur_image, cv2.COLOR_RGB2BGR)
