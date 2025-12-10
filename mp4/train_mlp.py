@@ -70,7 +70,7 @@ def train_model (model, train_dataset, val_dataset):
             target_indices = torch.argmax(acts, dim=1).to(device)
 
             optimizer.zero_grad()
-            outputs = model(obs) # Fixed: variable name from 'outpus' to 'outputs'
+            outputs = model(obs) 
             
             # Calculate Loss: Pass outputs (logits) and target_indices (Long tensor)
             loss = criterion(outputs, target_indices)
@@ -100,13 +100,13 @@ def train_model (model, train_dataset, val_dataset):
                 # Calculate target indices for the validation batch
                 target_indices = torch.argmax(acts, dim=1).to(device)
 
-                outputs = model(obs) # Fixed: variable name from 'outpus' to 'outputs'
+                outputs = model(obs) 
                 
                 # Calculate Loss: Pass outputs (logits) and target_indices (Long tensor)
                 loss = criterion(outputs, target_indices)
                 running_val_loss += loss.item() * obs.size(0)
 
-                _, predicted = torch.max(outputs.data, 1) # Fixed: variable name from 'outpus' to 'outputs'
+                _, predicted = torch.max(outputs.data, 1) 
                 val_total += target_indices.size(0)
                 val_correct += (predicted == target_indices).sum().item()
         
@@ -164,8 +164,6 @@ if __name__ == "__main__":
 
     train_dataset = BCDataset(train_obs, train_acts)
     val_dataset = BCDataset(val_obs, val_acts)
-
-
 
     # define and train model
     model = Policy()
