@@ -29,14 +29,13 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
 from scipy.spatial.transform import Rotation as R
 # from scipy.spatial.transform import Rotation
-from scipy.ndimage import ( # Needed for advanced image processing
+from scipy.ndimage import ( 
     binary_opening, binary_closing, binary_fill_holes,
     generate_binary_structure, label,binary_dilation,
 )
 
 from task_envs import MP2SceneCfg, PHYSICS_DT, RENDERING_DT
 
-# === 添加 Policy 类定义 (必须与训练脚本一致) ===
 class Policy(nn.Module):
     def __init__(self):
         super(Policy, self).__init__()
@@ -54,7 +53,7 @@ class Policy(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-# =================================================
+
 
 # wrap everything into a class so it is easier to access things
 class Experiment:
@@ -106,7 +105,6 @@ class Experiment:
         self.gripper_open_val = 0.04
         self.gripper_close_val = 0.0 # This is just a guess
 
-        # === ADDED: Load Policy Model ===
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.policy_model = Policy().to(self.device)
         
@@ -121,9 +119,7 @@ class Experiment:
                 print(f"[ERROR] Failed to load model weights: {e}")
         else:
             print(f"[WARNING] Model file NOT found at: {model_path}. Door opening phase will likely fail.")
-        # ================================
-    
-    # === ADDED: Helper for Door Position ===
+
     def get_door_pos(self):
         # Assumes the door prim is named "door" in MP2SceneCfg
         return torch.squeeze(self.scene["door"].data.root_link_pos_w).detach().cpu().numpy()
@@ -131,7 +127,6 @@ class Experiment:
     def get_current_eef_pos(self):
         # Helper to get fresh EEF pos for the policy loop
         return self.scene["ur5e"].data.body_state_w[0, self.scene["ur5e"].find_bodies(self.ik_body)[0][0], :7].detach().cpu().numpy()[:3]
-    # =======================================
  
 
     def move_robot_joint (self, target_joint_pos, target_gripper_pos, count = 10, time_for_residual_movement = 5):
@@ -302,7 +297,6 @@ class Experiment:
             time_for_residual_movement=5
         )
         
-    # === ADDED: Image Processing and Cube Identification Helper ===
     def _identify_blocking_cubes(self, intrinsics, extrinsics, x_pixel, y_pixel, cx, cy, fx, fy, height, width):
         """
         Performs camera capture, image processing, 3D reconstruction, and identifies blocking and safe cubes.
@@ -423,22 +417,17 @@ class Experiment:
 
         for info in red_infos:
             stats = info['stats']
-            # 使用方块顶部的 Z 坐标作为质心的 Z 坐标进行投影和距离计算
             xyz_world = np.array([stats['centroid_xy'][0], stats['centroid_xy'][1], stats['top_z']])
-            
-            # 1. 投影检查 (Projection Check): 检查质心最近的点是否在 door_mask 上
+
             distances_sq = np.sum((pc_world - xyz_world)**2, axis=2)
             v, u = np.unravel_index(np.argmin(distances_sq), distances_sq.shape)
             is_blocking_projection = door_mask[v, u]
             
-            # 2. 三维距离检查 (3D Proximity Check): 检查方块质心与门结构的最小 3D 距离
             is_blocking_proximity = False
             if is_door_points_available:
-                # 计算方块质心到所有门点云的最小距离
                 min_dist_to_door = np.min(np.linalg.norm(door_points_3d - xyz_world, axis=1))
                 is_blocking_proximity = min_dist_to_door < proximity_margin
 
-            # 如果满足任一条件，则视为阻塞方块
             if is_blocking_projection or is_blocking_proximity:
                 red_blocking_infos.append(info)
 
@@ -446,23 +435,19 @@ class Experiment:
             stats = info['stats']
             xyz_world = np.array([stats['centroid_xy'][0], stats['centroid_xy'][1], stats['top_z']])
             
-            # 1. 投影检查 (Projection Check)
             distances_sq = np.sum((pc_world - xyz_world)**2, axis=2)
             v, u = np.unravel_index(np.argmin(distances_sq), distances_sq.shape)
             is_blocking_projection = door_mask[v, u]
-            
-            # 2. 三维距离检查 (3D Proximity Check)
+
             is_blocking_proximity = False
             if is_door_points_available:
                 min_dist_to_door = np.min(np.linalg.norm(door_points_3d - xyz_world, axis=1))
                 is_blocking_proximity = min_dist_to_door < proximity_margin
 
-            # 如果满足任一条件，则视为阻塞方块
             if is_blocking_projection or is_blocking_proximity:
                 green_blocking_infos.append(info)
         
                 
-        # 8. Safe Cube Filtering
         blocking_red_ids = [info['cid'] for info in red_blocking_infos]
         safe_red_infos = []
         for info in red_infos:
@@ -488,7 +473,6 @@ class Experiment:
 
         return red_blocking_infos, green_blocking_infos, safe_red_infos, safe_green_infos, door_mask, pc_world
 
-    # === ADDED: Pick and Place Helper ===
     def _execute_pick_and_place(self, blocking_infos, safe_infos, cube_height=0.04):
         """
         Executes the pick-and-place sequence for a list of blocking cubes.
@@ -508,53 +492,38 @@ class Experiment:
             
             print(f"  -> Moving Blocking Cube ID {block_cube['cid']} to Safe Cube ID {target_base['cid']}")
             
-            # --- Coordinate Calculation ---
             pick_xy = block_cube['stats']['centroid_xy']
             pick_z = block_cube['stats']['top_z'] + z_offset_grasp
             
             place_xy = target_base['stats']['centroid_xy']
-            # New Z is Safe Cube's top + Cube Height + Stack Offset
             place_z = target_base['stats']['top_z'] + cube_height + z_offset_stack
             
-            # --- Action Sequence (Manhattan Path) ---
-            
-            # 1. Move to Pick Hover
             hover_pose = np.concatenate([pick_xy, [z_travel_height], fixed_quat])
             self.move_robot_ik(hover_pose)
             self.open_gripper()
             
-            # 2. Vertical Descent to Pick
             pick_pose = np.concatenate([pick_xy, [pick_z], fixed_quat])
             self.move_robot_ik(pick_pose)
             
-
-            # 3. Grasp
             self.close_gripper()
             self.sim_wait(5)
 
-            # 4. Vertical Lift
             self.move_robot_ik(hover_pose)
 
-            # 5. Move to Place Hover
             place_hover_pose = np.concatenate([place_xy, [z_travel_height], fixed_quat])
             self.move_robot_ik(place_hover_pose)
             
-            # 6. Vertical Descent to Place
             place_pose = np.concatenate([place_xy, [place_z], fixed_quat])
             self.move_robot_ik(place_pose)
 
-            # 7. Release
             self.open_gripper()
             self.sim_wait(5)
 
-            # 8. Retreat
             self.move_robot_ik(place_hover_pose)
 
-    # === ADDED: Main Logic from eval_mlp_door.py ===
     def run_door_policy(self):
         print("\n\n[DOOR POLICY] Starting Door Opening Phase...")
         
-        # 1. Warm-up: Move robot to start position defined in eval_mlp_door
         start_pos = np.array([0.4, 0.0, 0.35]) 
         base_quat = np.array([0, -np.sqrt(2)/2, np.sqrt(2)/2, 0]) 
         
@@ -564,20 +533,17 @@ class Experiment:
         self.move_robot_ik(start_pose, timeout_count=200)
         self.open_gripper() # Ensure gripper is open
 
-        # 2. Variables for Policy Loop
         max_steps = 600
         temp_dist_target = 0.0018
         rot_step = 0.05
         max_joint_change = 0.10
         
-        # State tracking
-        current_yaw = 0.0 # Policy assumes we start at 0 relative yaw from base_quat
+        current_yaw = 0.0
         gripper_state = -1 # -1 is Open
         is_rot_aligned = False
-        # === ADDED: Gripper 目标值和渐进速度 ===
-        self.gripper_step = 0.005 # 每次只移动 0.005m，实现慢速关闭
+        self.gripper_step = 0.01
         current_gripper_target = self.gripper_open_val
-        # ======================================
+
         # Smoothing Buffer
         history_len = 5
         action_history = deque(maxlen=history_len)
@@ -588,11 +554,9 @@ class Experiment:
         for step in range(max_steps):
             if not simulation_app.is_running(): break
             
-            # --- A. Get Observations ---
             current_robot_pos = self.get_current_eef_pos()
             current_door_pos = self.get_door_pos()
             
-            # Construct 8-dim input
             obs_vector = np.array([
                 current_robot_pos[0],
                 current_robot_pos[1],
@@ -604,13 +568,11 @@ class Experiment:
                 current_yaw
             ])
 
-            # --- B. Inference ---
+
             obs_tensor = torch.FloatTensor(obs_vector).unsqueeze(0).to(self.device)
             with torch.no_grad():
                 logits = self.policy_model(obs_tensor)
 
-                # --- C. Apply Heuristic Masks (Copied exactly from eval script) ---
-                # 1. Rotation Locking
                 if abs(current_yaw) > 1.45: is_rot_aligned = True
                 if is_rot_aligned:
                     logits[0, 8] = -1e9 # Block Stationary
@@ -618,34 +580,9 @@ class Experiment:
                     logits[0, 10] = -1e9 # Block Rot -
                 if current_robot_pos[2] > 0.275:
                     logits[0,7] = -1e20 # Block Close Gripper at High Altitude
-                # # 2. Geometric Alignment Logic
-                # diff_y = abs(current_robot_pos[1] - current_door_pos[1])
-                # diff_x = abs(current_robot_pos[0] - current_door_pos[0]) 
-                
-                # is_x_aligned = diff_x > 0.20 # Reached edge
-                # is_y_aligned = diff_y < 0.02 # Centered
-
-                # # 3. High Altitude Logic
-                # if not (is_x_aligned and is_y_aligned):
-                #     # Phase A: Not aligned yet
-                #     logits[0, 5] = -1e9 # Block Down (-Z)
-                #     logits[0, 7] = -1e9 # Block Close Gripper
-
-                #     if not is_x_aligned:
-                #         # Block Y motion, focus on X
-                #         logits[0, 2] = -1e9
-                #         logits[0, 3] = -1e9
-                # else:
-                #     # Phase B: Aligned (Descent)
-                #     if current_robot_pos[2] < 0.28:
-                #         # Close to handle -> Encourage Grasp
-                #         logits[0, 7] = 1e20  
-                #     else:
-                #         logits[0, 7] = -1e9 # Too high to grasp
 
                 raw_action_idx = torch.argmax(logits, dim=1).item()
 
-            # --- D. Smoothing ---
             action_history.append(raw_action_idx)
             if len(action_history) == history_len:
                 final_action_idx = Counter(action_history).most_common(1)[0][0]
@@ -655,7 +592,6 @@ class Experiment:
             if step % 10 == 0:
                  print(f"[DOOR STEP {step}] Act: {final_action_idx} | Yaw: {current_yaw:.2f} | Z: {current_robot_pos[2]:.3f}")
 
-            # --- E. Execute Action (Calculate Target) ---
             target_pos = current_robot_pos.copy()
             
             # Map index to action
@@ -667,10 +603,9 @@ class Experiment:
             elif final_action_idx == 5: target_pos[2] -= temp_dist_target
             elif final_action_idx == 6: 
                 gripper_state = -1 # Open
-                current_gripper_target = self.gripper_open_val # 立即完全打开
+                current_gripper_target = self.gripper_open_val 
             elif final_action_idx == 7: 
                 gripper_state = 1  # Close
-                # 渐进式关闭: 每次只向目标值靠近 self.gripper_step
                 if current_gripper_target > self.gripper_close_val:
                     current_gripper_target -= self.gripper_step
                     current_gripper_target = max(current_gripper_target, self.gripper_close_val)
@@ -686,8 +621,7 @@ class Experiment:
             target_quat = np.array([final_quat_scipy[3], final_quat_scipy[0], final_quat_scipy[1], final_quat_scipy[2]])
 
             target_pose = np.concatenate([target_pos, target_quat])
-            
-            # --- F. Low-Level Control (Non-Blocking IK) ---
+
             self.diff_ik_controller.set_command(torch.tensor(target_pose, device=self.sim.device))
 
             jacobian = self.scene["ur5e"].root_physx_view.get_jacobians()[:, self.ee_jacobi_idx, :, self.robot_entity_cfg.joint_ids]
@@ -708,11 +642,7 @@ class Experiment:
             all_joint_pos_des = torch.zeros((1, 8))
             all_joint_pos_des[:, :6] = joint_pos_des
             
-            # Handle Gripper
-            # if gripper_state == -1:
-            #     all_joint_pos_des[:, 6:] = torch.tensor([self.gripper_open_val, self.gripper_open_val]).to(self.sim.device)
-            # else:
-            #     all_joint_pos_des[:, 6:] = torch.tensor([self.gripper_close_val, self.gripper_close_val]).to(self.sim.device)
+
             gripper_val = current_gripper_target
             all_joint_pos_des[:, 6:] = torch.tensor([gripper_val, gripper_val]).to(self.sim.device)
             # Apply
@@ -731,7 +661,6 @@ class Experiment:
     
         # Reset the environment (Relies on default states defined in task_envs.py)
         self.scene.reset()
-        # fixed_quat = self.robot_quat.copy()
         # Update internal robot pose trackers after reset
         self.robot_pose = self.scene['ur5e'].data.body_state_w[0, self.scene['ur5e'].find_bodies(self.ik_body)[0][0], :7].detach().cpu().numpy()
         self.robot_pos = self.robot_pose[:3]
@@ -770,7 +699,6 @@ class Experiment:
         fx = intrinsics[0,0]; fy = intrinsics[1,1]
         cx = intrinsics[0,2]; cy = intrinsics[1,2]
 
-        # === TWO-PASS CUBE CLEARING LOGIC ===
         MAX_PASSES = 2
         
         for pass_num in range(1, MAX_PASSES + 1):
