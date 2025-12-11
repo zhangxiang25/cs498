@@ -48,7 +48,6 @@ UR5E_CONFIG = ArticulationCfg(
     },
 )
 
-# Assumes 'door_usd' folder is next to this file
 DOOR_CONFIG = ArticulationCfg(
     spawn = sim_utils.UsdFileCfg(
         usd_path = "{}/door_usd/door.usd".format(os.path.dirname(os.path.abspath(__file__))),
@@ -57,7 +56,7 @@ DOOR_CONFIG = ArticulationCfg(
     ),
     init_state = ArticulationCfg.InitialStateCfg(
         joint_pos = {
-            "hinge_joint": 0.0  # This MUST match the joint name from the editor
+            "hinge_joint": 0.0  
         },
     ),
     actuators = {
@@ -118,23 +117,15 @@ class DoorSceneCfg(InteractiveSceneCfg):
         table_min_y = table_center_pos[1] - table_size[1] / 2.0 
         table_max_y = table_center_pos[1] + table_size[1] / 2.0  
 
-        # --- Randomization for Door (Modified for easier training) ---
-        # The door asset's built-in height is 0.2, so its center is 0.1 above its base.
-        # We place its base on the table (z=0.21), so the center z is 0.21 + 0.1 = 0.31
         door_z = table_top_z + 0.01
-
-        # Modification 1: Zero rotation noise (Fixed orientation)
         door_rot_noise = 0.0  
-        
-        # Modification 2: Minimal position noise (Centered on table)
+
         pos_noise = 0.01  # 1cm noise
         
         # Center the door on the table with tiny jitter
         door_x = table_center_pos[0] + (np.random.random() - 0.5) * 2 * pos_noise
         door_y = table_center_pos[1] + (np.random.random() - 0.5) * 2 * pos_noise
         
-        # Fixed rotation (yaw only)
-        # -90 degrees typically faces the Y-axis. Adjust if needed based on your USD.
         door_rot_euler = np.array([-90.0, 0.0, 0.0])
         door_rot_euler[2] += (np.random.random() - 0.5) * 2. * door_rot_noise
         door_rot_quat = R.from_euler("xyz", door_rot_euler, degrees=True).as_quat()
