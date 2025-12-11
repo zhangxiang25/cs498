@@ -25,20 +25,19 @@ class Policy (nn.Module):
     def __init__(self):
         super(Policy, self).__init__()
 
-        # === MODIFIED ARCHITECTURE FOR DOOR TASK ===
         # Input: 8 dims 
         #   [Robot_X, Robot_Y, Robot_Z, Gripper_State, Door_X, Door_Y, Door_Z, Robot_Yaw]
         # Output: 11 dims
         #   [+X, -X, +Y, -Y, +Z, -Z, Open, Close, Stationary, Rot+, Rot-]
         
         self.net = nn.Sequential(
-            nn.Linear(8, 256),  # Increased width slightly for more complex task
+            nn.Linear(8, 256),  
             nn.ReLU(),
             nn.Dropout(0.1),
             nn.Linear(256, 256),
             nn.ReLU(),
             nn.Dropout(0.1),
-            nn.Linear(256, 11)  # Output size = 11
+            nn.Linear(256, 11)  
         )
 
     
@@ -62,26 +61,20 @@ def train_model (model, train_dataset, val_dataset):
 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=20)
     print("Calculating class weights for imbalance handling...")
-    all_labels = np.argmax(train_dataset.actions, axis=1) # 把 One-hot 转成索引
-    class_counts = np.bincount(all_labels, minlength=11)  # 统计每类有多少个
+    all_labels = np.argmax(train_dataset.actions, axis=1) 
+    class_counts = np.bincount(all_labels, minlength=11)  
     
-    print(f"Class counts: {class_counts}") # 打印出来看看分布情况
-    # 1. 计算基础权重
+    print(f"Class counts: {class_counts}") 
+
     total_samples = len(all_labels)
-    # 加上 1.0 防止除以 0，但后面我们会修正它
     class_weights = total_samples / (11 * (class_counts + 1.0))
     
-    # 2. 【关键步骤】手动修复数量为 0 的类别
-    # 找到数量为 0 的类别索引（比如你的 index 2）
     zero_count_indices = np.where(class_counts == 0)[0]
-    
-    # 将这些类别的权重强制设为 0.0 (让模型训练时忽略它，而不是报错或爆炸)
+
     class_weights[zero_count_indices] = 0.0 
-    
-    # 3. 转为 Tensor
+
     class_weights = torch.FloatTensor(class_weights).to(device)
     print(f"Safe Class Weights: {class_weights}")
-    # 3. 将权重传给 Loss 函数
     criterion = nn.CrossEntropyLoss(weight=class_weights)
 
     train_losses = []
@@ -96,9 +89,7 @@ def train_model (model, train_dataset, val_dataset):
 
         for obs, acts in train_loader:
             obs = obs.to(device).float()
-            
-            # Convert One-Hot Action Vectors to Class Indices
-            # acts shape: [batch, 11] -> target_indices shape: [batch]
+
             target_indices = torch.argmax(acts, dim=1).to(device)
 
             optimizer.zero_grad()
@@ -118,7 +109,6 @@ def train_model (model, train_dataset, val_dataset):
         train_losses.append(avg_train_loss)
         train_acc = 100 * train_correct / train_total
 
-        # Validation Phase
         model.eval()
         running_val_loss = 0.0
         val_correct = 0
@@ -148,8 +138,6 @@ def train_model (model, train_dataset, val_dataset):
             print(f"Epoch [{epoch+1}/{num_epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Val Acc: {val_acc:.2f}%")
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            # torch.save(model.state_dict(), 'mlp_model_door.pth') # 覆盖保存最好的
-            # print(f"Saved best model with Acc: {val_acc:.2f}%")
     # Plotting
     plt.figure()
     plt.plot(range(1, num_epochs+1), train_losses, label='Train Loss')
@@ -167,8 +155,7 @@ def train_model (model, train_dataset, val_dataset):
 
 
 if __name__ == "__main__":
-    # === PATH CONFIGURATION ===
-    # Make sure this matches the path in collect_demo_door.py
+
     dataset_dir = r'C:\IsaacLab\cs498\final\image'
 
     all_observations = []
