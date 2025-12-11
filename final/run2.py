@@ -28,7 +28,6 @@ from isaaclab.controllers import DifferentialIKController, DifferentialIKControl
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.scene import InteractiveScene
 from scipy.spatial.transform import Rotation as R
-# from scipy.spatial.transform import Rotation
 from scipy.ndimage import ( 
     binary_opening, binary_closing, binary_fill_holes,
     generate_binary_structure, label,binary_dilation,
@@ -121,7 +120,6 @@ class Experiment:
             print(f"[WARNING] Model file NOT found at: {model_path}. Door opening phase will likely fail.")
 
     def get_door_pos(self):
-        # Assumes the door prim is named "door" in MP2SceneCfg
         return torch.squeeze(self.scene["door"].data.root_link_pos_w).detach().cpu().numpy()
 
     def get_current_eef_pos(self):
@@ -160,7 +158,6 @@ class Experiment:
         for i in range (count):
 
             self.scene["ur5e"].set_joint_position_target((target - initial)/count*i + initial)
-            # scene["ur5e"].set_joint_position_target(target)
 
             self.scene.write_data_to_sim()
             self.sim.step()
@@ -702,9 +699,8 @@ class Experiment:
         MAX_PASSES = 2
         
         for pass_num in range(1, MAX_PASSES + 1):
-            print(f"\n====================================================")
-            print(f"========= STARTING CUBE CLEARING PASS {pass_num} =========")
-            print(f"====================================================")
+            print(f"STARTING CUBE CLEARING PASS {pass_num}")
+
 
             # 1. RE-IDENTIFY CUBES
             (red_blocking_infos, green_blocking_infos, 
@@ -721,29 +717,27 @@ class Experiment:
                 break
                 
             # 2. RED CUBE PICK-AND-PLACE
-            print(f"\n--- Red Cube Movement (Pass {pass_num}) ---")
+            print(f"\nRed Cube Movement (Pass {pass_num}) ")
             if len(red_blocking_infos) > 0 and len(safe_red_infos) > 0:
                 self._execute_pick_and_place(red_blocking_infos, safe_red_infos, cube_height=0.04)
             else:
                 print("Skipping Red Cube movement (not enough blocking or safe cubes).")
 
             # 3. GREEN CUBE PICK-AND-PLACE
-            print(f"\n--- Green Cube Movement (Pass {pass_num}) ---")
+            print(f"\nGreen Cube Movement (Pass {pass_num})")
             if len(green_blocking_infos) > 0 and len(safe_green_infos) > 0:
                 # Green cubes are slightly larger (approx 0.05m high)
                 self._execute_pick_and_place(green_blocking_infos, safe_green_infos, cube_height=0.05)
             else:
                 print("Skipping Green Cube movement (not enough blocking or safe cubes).")
 
-            print(f"\n========= PASS {pass_num} COMPLETED =========")
+            print(f"\nPASS {pass_num} COMPLETED ")
             self.move_robot_ik(np.concatenate([away_pos, self.robot_quat])) # Move away for next scan
             self.sim_wait(20)
 
         # 4. FINAL CHECK (Only performed if we did not break early)
         if len(red_blocking_infos) > 0 or len(green_blocking_infos) > 0:
-             print("\n====================================================")
-             print("=== FINAL CUBE CHECK AFTER TWO PASSES ===")
-             print("====================================================")
+             print("\n FINAL CUBE CHECK AFTER TWO PASSES")
              
              # Re-identify one final time to determine success/failure of clearing
              (red_blocking_infos_final, green_blocking_infos_final, 
