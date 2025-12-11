@@ -48,8 +48,6 @@ UR5E_CONFIG = ArticulationCfg(
     },
 )
 
-# This points to the USD file you just created.
-# We assume you created a 'door_usd' folder next to this env.py file.
 DOOR_CONFIG = ArticulationCfg(
     spawn = sim_utils.UsdFileCfg(
         # This path finds the 'door_usd' folder in the same directory as this script
@@ -59,7 +57,7 @@ DOOR_CONFIG = ArticulationCfg(
     ),
     init_state = ArticulationCfg.InitialStateCfg(
         joint_pos = {
-            "hinge_joint": 0.0  # This MUST match the joint name from the editor
+            "hinge_joint": 0.0  
         },
     ),
     actuators = {
@@ -120,28 +118,18 @@ class MP2SceneCfg(InteractiveSceneCfg):
         table_min_y = table_center_pos[1] - table_size[1] / 2.0  # -0.35
         table_max_y = table_center_pos[1] + table_size[1] / 2.0  # 0.35
 
-        # --- Randomization for Door (Modified) ---
         # The door asset's built-in height is 0.2, so its center is 0.1 above its base.
         # We place its base on the table (z=0.21), so the center z is 0.21 + 0.1 = 0.31
         door_z = table_top_z + 0.01
 
-        # modification 1: 减小旋转随机性
-        # 原来是 180 度 (全朝向随机)，现在改为 0 度 (固定) 或很小的值 (如 5 度)
         door_rot_noise = 0.0  
+
+        pos_noise = 0.01  
         
-        # modification 2: 减小位置随机性
-        # 不再使用 margin 和 min/max 计算，而是直接基于桌子中心 (table_center_pos) 加一点点噪声
-        # table_center_pos 在代码前面定义过，通常是 (0.5, 0.0, 0.2)
-        pos_noise = 0.01  # 仅 1cm 的随机误差，几乎相当于固定位置
-        
-        # 在桌子中心 X 附近微调
         door_x = table_center_pos[0] + (np.random.random() - 0.5) * 2 * pos_noise
-        # 在桌子中心 Y 附近微调 (稍微偏一点可能方便机器人抓，视情况调整)
         door_y = table_center_pos[1] + (np.random.random() - 0.5) * 2 * pos_noise
         
         # Random rotation (yaw only)
-        # 基础角度 -90.0 度意味着门面朝向 Y 轴（侧对着机器人）或者 X 轴，具体取决于你的 USD 坐标系。
-        # 如果你发现这角度不好抓，可以手动改这个 -90.0 为 0.0 或 180.0
         door_rot_euler = np.array([-90.0, 0.0, 0.0])
         door_rot_euler[2] += (np.random.random() - 0.5) * 2. * door_rot_noise
         door_rot_quat = R.from_euler("xyz", door_rot_euler, degrees=True).as_quat()
@@ -149,7 +137,6 @@ class MP2SceneCfg(InteractiveSceneCfg):
         # Cube properties
         red_cube_size = 0.04
         green_cube_size = 0.05
-        # Correct Z-position: table_top_z (0.21) + half_height
         red_cube_z = table_top_z + (red_cube_size / 2.0)     # 0.23
         green_cube_z = table_top_z + (green_cube_size / 2.0)   # 0.235
         cube_rot_noise = 180.
@@ -193,7 +180,7 @@ class MP2SceneCfg(InteractiveSceneCfg):
             
             # Create the cube config (uses the validated red_x and red_y)
             cube_cfg = AssetBaseCfg(
-                prim_path = f'/World/red_cube_{i+1}', # Dynamic prim path (e.g., /World/red_cube_1)
+                prim_path = f'/World/red_cube_{i+1}', 
                 spawn = sim_utils.MeshCuboidCfg(
                     size = (red_cube_size, red_cube_size, red_cube_size),
                     rigid_props = sim_utils.RigidBodyPropertiesCfg(),
@@ -245,7 +232,7 @@ class MP2SceneCfg(InteractiveSceneCfg):
     
             # Create the cube config (uses the validated green_x and green_y)
             cube_cfg = AssetBaseCfg(
-                prim_path = f'/World/green_cube_{i+1}', # Dynamic prim path (e.g., /World/green_cube_1)
+                prim_path = f'/World/green_cube_{i+1}', 
                 spawn = sim_utils.MeshCuboidCfg(
                     size = (green_cube_size, green_cube_size, green_cube_size),
                     rigid_props = sim_utils.RigidBodyPropertiesCfg(),
