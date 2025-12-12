@@ -470,12 +470,18 @@ class Experiment:
 
         return red_blocking_infos, green_blocking_infos, safe_red_infos, safe_green_infos, door_mask, pc_world
 
-    def _execute_pick_and_place(self, blocking_infos, safe_infos, cube_height=0.04):
+    def _execute_pick_and_place(self, blocking_infos, safe_infos, cube_height=0.04, yaw_offset = 0.0):
         """
         Executes the pick-and-place sequence for a list of blocking cubes.
         """
        
-        fixed_quat = np.array([0.0, 1.0, 0.0, 0.0])
+        # fixed_quat = np.array([0.0, 1.0, 0.0, 0.0])
+        r_base = R.from_quat([1.0, 0.0, 0.0, 0.0]) 
+        r_rot = R.from_euler('z', yaw_offset, degrees=True)
+        r_final = r_rot * r_base
+        q = r_final.as_quat() # 得到 [x, y, z, w]
+    
+        fixed_quat = np.array([q[3], q[0], q[1], q[2]])
         z_travel_height = 0.4
         z_hover_height = 0.4
         z_offset_grasp = 0.015
@@ -530,7 +536,7 @@ class Experiment:
         self.move_robot_ik(start_pose, timeout_count=200)
         self.open_gripper() # Ensure gripper is open
 
-        max_steps = 600
+        max_steps = 800
         temp_dist_target = 0.0018
         rot_step = 0.05
         max_joint_change = 0.10
@@ -715,11 +721,15 @@ class Experiment:
             if len(red_blocking_infos) == 0 and len(green_blocking_infos) == 0:
                 print("No cubes blocking the door. Moving to next phase.")
                 break
-                
+            if pass_num == 1:
+                current_yaw = 0.0   # 第一次：原始方向
+            else:
+                current_yaw = 90.0  # 第二次：旋转90度
+
             # 2. RED CUBE PICK-AND-PLACE
             print(f"\nRed Cube Movement (Pass {pass_num}) ")
             if len(red_blocking_infos) > 0 and len(safe_red_infos) > 0:
-                self._execute_pick_and_place(red_blocking_infos, safe_red_infos, cube_height=0.04)
+                self._execute_pick_and_place(red_blocking_infos, safe_red_infos, cube_height=0.04, yaw_offset=current_yaw)
             else:
                 print("Skipping Red Cube movement (not enough blocking or safe cubes).")
 
@@ -727,7 +737,7 @@ class Experiment:
             print(f"\nGreen Cube Movement (Pass {pass_num})")
             if len(green_blocking_infos) > 0 and len(safe_green_infos) > 0:
                 # Green cubes are slightly larger (approx 0.05m high)
-                self._execute_pick_and_place(green_blocking_infos, safe_green_infos, cube_height=0.05)
+                self._execute_pick_and_place(green_blocking_infos, safe_green_infos, cube_height=0.05, yaw_offset=current_yaw)
             else:
                 print("Skipping Green Cube movement (not enough blocking or safe cubes).")
 
